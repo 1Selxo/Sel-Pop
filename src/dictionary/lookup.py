@@ -666,6 +666,14 @@ class Lookup(threading.Thread):
             word_key = (entry['written_form'], entry['reading'])
             word_groups[word_key].append(entry)
 
+        # Propagate the best (lowest) frequency across all dictionary entries
+        # in each word group — ensures frequency displays regardless of which
+        # dictionary is listed first in priority order.
+        for entries in word_groups.values():
+            best = min(e['freq'] for e in entries)
+            for e in entries:
+                e['freq'] = best
+
         processed_groups = []
         for entries in word_groups.values():
             entries.sort(key=lambda x: x['dictionary_priority'])
