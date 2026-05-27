@@ -801,11 +801,26 @@ class Popup(QWidget):
     #  Content rendering                                                    #
     # ------------------------------------------------------------------ #
 
-    def _render_senses(self, entry, max_ratio: float, inline_only: bool = False) -> tuple:
-        """Render the definitions block for one DictionaryEntry. Returns (senses_html, updated_max_ratio).
-        inline_only=True skips the leading <br> so the caller controls line breaks."""
+    def _render_senses(self, entry, max_ratio: float, inline_only: bool = False,
+                       max_senses: int = None) -> tuple:
+        """Render the definitions block for one DictionaryEntry.
+
+        Args:
+            max_senses: If set, only render the first N senses.
+
+        Returns (senses_html, updated_max_ratio, rendered, total) where
+        rendered and total are sense counts (for lazy-expansion tracking).
+        """
+        sense_count = len(entry.senses)
+        effective_limit = max_senses if max_senses is not None else sense_count
+        # Compact mode: always render all senses (already one line)
+        if config.compact_mode:
+            effective_limit = sense_count
+
         parts_calc, parts_html = [], []
         for idx, sense in enumerate(entry.senses):
+            if idx >= effective_limit:
+                break
             glosses   = sense.get("glosses", [])
             pos_list  = sense.get("pos",     [])
             tags_list = sense.get("tags",    [])
@@ -845,7 +860,7 @@ class Popup(QWidget):
             sep_space = " " if config.compact_mode else "<br>"
             senses_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
                            f'{full_def_html}</span>')
-        return senses_html, max_ratio
+        return senses_html, max_ratio, effective_limit, sense_count
 
     def _render_groups_to_html(self, groups: list, start_index: int = 0) -> tuple:
         """Render a list of entry groups to an HTML string.
@@ -903,7 +918,7 @@ class Popup(QWidget):
             body_parts = []
             for entry in dict_entries:
                 if multi_dict:
-                    senses_html, max_ratio = self._render_senses(entry, max_ratio, inline_only=True)
+                    senses_html, max_ratio, _, _ = self._render_senses(entry, max_ratio, inline_only=True)
                     dict_name = getattr(entry, 'dictionary_name', '') or 'Dictionary'
                     dict_label = (
                         f'<span style="color:{config.color_foreground};'
@@ -912,7 +927,7 @@ class Popup(QWidget):
                     )
                     body_parts.append(f'{dict_label}{senses_html}')
                 else:
-                    senses_html, max_ratio = self._render_senses(entry, max_ratio)
+                    senses_html, max_ratio, _, _ = self._render_senses(entry, max_ratio)
                     if getattr(entry, 'dictionary_name', ''):
                         header_html += (
                             f' <span style="color:{config.color_foreground};'
