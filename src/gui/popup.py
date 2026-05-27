@@ -1186,19 +1186,29 @@ class Popup(QWidget):
         QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
 
     def _append_next_lazy_batch(self):
-        """Render the next _GROUPS_PER_LOAD pending groups and append them
-        without disturbing the user's current scroll position."""
+        """Render the next _GROUPS_PER_LOAD pending groups with initial sense
+        limits, append to all four parallel tracking lists."""
         if not self._lazy_pending_groups:
             return
 
-        batch                     = self._lazy_pending_groups[:self._GROUPS_PER_LOAD]
+        batch = self._lazy_pending_groups[:self._GROUPS_PER_LOAD]
         self._lazy_pending_groups = self._lazy_pending_groups[self._GROUPS_PER_LOAD:]
 
-        batch_html, _ = self._render_groups_to_html(
-            batch, start_index=self._lazy_next_group_index
-        )
+        parts, groups, indices, states = [], [], [], []
+        for i, group in enumerate(batch):
+            g_idx = self._lazy_next_group_index + i
+            init_limits = self._initial_sense_limits(group)
+            html, sense_state = self._render_one_group(group, g_idx, sense_limits=init_limits)
+            parts.append(html)
+            groups.append(group)
+            indices.append(g_idx)
+            states.append(sense_state)
+
         self._lazy_next_group_index += len(batch)
-        self._lazy_rendered_parts.append(batch_html)
+        self._lazy_rendered_parts.extend(parts)
+        self._rendered_groups.extend(groups)
+        self._group_indices.extend(indices)
+        self._rendered_sense_state.extend(states)
 
         self._commit_html()
 
