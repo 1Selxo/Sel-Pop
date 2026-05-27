@@ -58,11 +58,20 @@ class Popup(QWidget):
         # can never leave blank space at the top of the popup.
         self._scroll_reset_frames  = 0
 
-        # Lazy rendering — only the first batch of entry groups is rendered on
-        # initial display; remaining groups load as the user scrolls down.
+        # Lazy rendering — two-tier: entry groups + per-entry senses.
+        # Four parallel lists indexed by rendered-group position:
+        self._lazy_rendered_parts   = []    # HTML chunks per rendered group
+        self._rendered_groups       = []    # raw group data (for re-render on expansion)
+        self._group_indices         = []    # absolute group index (for <hr> decisions)
+        self._rendered_sense_state  = []    # per-group: [(entry_idx, shown, total), ...]
         self._lazy_pending_groups   = []    # groups not yet rendered
-        self._lazy_rendered_parts   = []    # accumulated HTML chunks
-        self._lazy_next_group_index = 0     # absolute group index for <hr> placement
+        self._lazy_next_group_index = 0     # absolute group index for next batch
+
+        # Per-entry sense limits
+        self._SENSES_PER_ENTRY_INITIAL = 4  # senses rendered on first show
+        self._SENSES_PER_LOAD         = 5  # senses added per scroll expansion
+        self._GROUPS_PER_LOAD         = 3  # groups added per scroll expansion
+
         self._dismissed_by_click   = False
 
         self.shared_state = shared_state
@@ -837,10 +846,6 @@ class Popup(QWidget):
             senses_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
                            f'{full_def_html}</span>')
         return senses_html, max_ratio
-
-    # How many word/reading groups to render on first display, and per scroll trigger.
-    _INITIAL_RENDER_GROUPS = 2
-    _GROUPS_PER_LOAD = 3
 
     def _render_groups_to_html(self, groups: list, start_index: int = 0) -> tuple:
         """Render a list of entry groups to an HTML string.
