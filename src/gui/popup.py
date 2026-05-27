@@ -862,6 +862,107 @@ class Popup(QWidget):
                            f'{full_def_html}</span>')
         return senses_html, max_ratio, effective_limit, sense_count
 
+    def _initial_sense_limits(self, group) -> dict:
+        """Build {entry_idx: _SENSES_PER_ENTRY_INITIAL} for dictionary entries
+        in a group. KanjiEntry groups return an empty dict (no limiting)."""
+        if isinstance(group, KanjiEntry):
+            return {}
+        _, dict_entries = group
+        return {i: self._SENSES_PER_ENTRY_INITIAL for i in range(len(dict_entries))}
+
+    def _render_one_group(self, group, group_index: int, sense_limits: dict = None):
+        """Render a single entry group to HTML with optional per-entry sense limits.
+
+        Args:
+            group: KanjiEntry or [word_key, [DictionaryEntry, ...]]
+            group_index: absolute position in the full group list (for <hr> decision)
+            sense_limits: {entry_idx: max_senses} — when set, each dictionary entry
+                          only renders up to this many senses. None = render all.
+
+        Returns (html: str, sense_state: list[tuple])
+            sense_state: [(entry_idx, rendered, total), ...] for entries with
+                         unrendered senses remaining.
+        """
+        # ── Kanji entry ──────────────────────────────────────────────
+        if isinstance(group, KanjiEntry):
+            return self._render_kanji_entry(group), []
+
+        # ── Dictionary entry group ───────────────────────────────────
+        word_key, dict_entries = group
+        first_entry = dict_entries[0]
+
+        header_calc = first_entry.written_form or ""
+        if first_entry.reading:
+            header_calc += f" [{first_entry.reading}]"
+        max_ratio = max(0.0, len(header_calc) / self.header_chars_per_line)
+
+        header_html = (
+            f'<span style="color:{config.color_highlight_word};'
+            f'font-size:{config.font_size_header}px;">{first_entry.written_form}</span>'
+        )
+        if first_entry.reading:
+            header_html += (
+                f' <span style="color:{config.color_highlight_reading};'
+                f'font-size:{config.font_size_header - 2}px;">[{first_entry.reading}]</span>'
+            )
+        if first_entry.deconjugation_process and config.show_deconjugation:
+            dc = " ← ".join(p for p in first_entry.deconjugation_process if p)
+            if dc:
+                header_html += (
+                    f' <span style="color:{config.color_foreground};'
+                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">({dc})</span>'
+                )
+        if config.show_frequency and first_entry.freq < 999_999:
+            header_html += (
+                f' <span style="color:{config.color_foreground};'
+                f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{first_entry.freq}</span>'
+            )
+
+        multi_dict = len(dict_entries) > 1
+        body_parts = []
+        sense_state = []
+
+        for entry_idx, entry in enumerate(dict_entries):
+            limit = (sense_limits or {}).get(entry_idx)
+            if multi_dict:
+                senses_html, max_ratio, rendered, total = self._render_senses(
+                    entry, max_ratio, inline_only=True, max_senses=limit
+                )
+                dict_name = getattr(entry, 'dictionary_name', '') or 'Dictionary'
+                dict_label = (
+                    f'<span style="color:{config.color_foreground};'
+                    f'font-size:{config.font_size_definitions}px;opacity:0.85;">'
+                    f'<b>{dict_name}:</b> </span>'
+                )
+                body_parts.append(f'{dict_label}{senses_html}')
+            else:
+                senses_html, max_ratio, rendered, total = self._render_senses(
+                    entry, max_ratio, max_senses=limit
+                )
+                if getattr(entry, 'dictionary_name', ''):
+                    header_html += (
+                        f' <span style="color:{config.color_foreground};'
+                        f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
+                        f'[{entry.dictionary_name}]</span>'
+                    )
+                body_parts.append(senses_html)
+
+            if rendered < total:
+                sense_state.append((entry_idx, rendered, total))
+
+        if multi_dict:
+            p_header = f'<p style="margin:0;padding:0;">{header_html}</p>'
+            p_dicts = ''.join(
+                f'<p style="margin:0;padding:0;margin-top:3px;">{part}</p>'
+                for part in body_parts
+            )
+            html = p_header + p_dicts
+        else:
+            combined_body = body_parts[0] if body_parts else ''
+            html = f"{header_html}{combined_body}"
+
+        return html, sense_state
+
     def _render_groups_to_html(self, groups: list, start_index: int = 0) -> tuple:
         """Render a list of entry groups to an HTML string.
         start_index is the absolute group index of groups[0], used only to decide
