@@ -1011,13 +1011,20 @@ class Popup(QWidget):
         if sb.maximum() > 0 and value >= sb.maximum() * 0.70:
             self._append_next_lazy_batch()
 
+    def _commit_html(self):
+        """Rebuild full HTML from parts and apply with scroll preservation."""
+        sb = self.content_scroll.verticalScrollBar()
+        saved_pos = sb.value()
+        full_html = "".join(self._lazy_rendered_parts)
+        self._last_html = full_html
+        self.display_label.setText(full_html)
+        QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
+
     def _append_next_lazy_batch(self):
         """Render the next _GROUPS_PER_LOAD pending groups and append them
         without disturbing the user's current scroll position."""
         if not self._lazy_pending_groups:
             return
-        sb        = self.content_scroll.verticalScrollBar()
-        saved_pos = sb.value()
 
         batch                     = self._lazy_pending_groups[:self._GROUPS_PER_LOAD]
         self._lazy_pending_groups = self._lazy_pending_groups[self._GROUPS_PER_LOAD:]
@@ -1028,12 +1035,7 @@ class Popup(QWidget):
         self._lazy_next_group_index += len(batch)
         self._lazy_rendered_parts.append(batch_html)
 
-        full_html       = "".join(self._lazy_rendered_parts)
-        self._last_html = full_html   # keep in sync so the 60ms timer doesn't re-render
-        self.display_label.setText(full_html)
-        # Restore position after Qt settles the layout — content above the
-        # saved position is unchanged so this keeps the view perfectly stable.
-        QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
+        self._commit_html()
 
     def _render_kanji_entry(self, entry: KanjiEntry) -> str:
         c_word = config.color_highlight_word
