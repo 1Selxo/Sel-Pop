@@ -1086,12 +1086,15 @@ class Popup(QWidget):
         return self._cached_popup_size
 
     def _calculate_content(self, entries) -> 'str | None':
-        """Build and return the initial HTML to display.  Only the first
-        _INITIAL_RENDER_GROUPS groups are rendered — the rest load as the
-        user scrolls via _on_scroll_lazy_load."""
+        """Build initial HTML for display. Renders groups incrementally until
+        content fills ~1.2x the popup height, then stops. Each entry within a
+        group only renders its first _SENSES_PER_ENTRY_INITIAL senses."""
         if not self.is_calibrated or not entries:
-            self._lazy_pending_groups = []
-            self._lazy_rendered_parts = []
+            self._lazy_pending_groups   = []
+            self._lazy_rendered_parts   = []
+            self._rendered_groups       = []
+            self._group_indices         = []
+            self._rendered_sense_state  = []
             return None
 
         # Build display groups: entries sharing (written_form, reading) merged.
@@ -1106,13 +1109,34 @@ class Popup(QWidget):
             else:
                 all_groups.append([word_key, [entry]])
 
-        initial_groups              = all_groups[:self._INITIAL_RENDER_GROUPS]
-        self._lazy_pending_groups   = all_groups[self._INITIAL_RENDER_GROUPS:]
-        self._lazy_next_group_index = len(initial_groups)
+        target_height = self._fixed_popup_size().height() * 1.2
+        content_width = self.max_content_width
 
-        initial_html, _ = self._render_groups_to_html(initial_groups, start_index=0)
-        self._lazy_rendered_parts   = [initial_html]
-        return initial_html
+        self._lazy_rendered_parts  = []
+        self._rendered_groups      = []
+        self._group_indices        = []
+        self._rendered_sense_state = []
+
+        for i, group in enumerate(all_groups):
+            init_limits = self._initial_sense_limits(group)
+            html, sense_state = self._render_one_group(group, i, sense_limits=init_limits)
+            test_html = "".join(self._lazy_rendered_parts) + html
+            h = self._measure_html_height(test_html, content_width)
+
+            self._lazy_rendered_parts.append(html)
+            self._rendered_groups.append(group)
+            self._group_indices.append(i)
+            self._rendered_sense_state.append(sense_state)
+
+            if h > target_height and i >= 1:  # always show at least 1 group
+                self._lazy_pending_groups   = all_groups[i + 1:]
+                self._lazy_next_group_index = i + 1
+                break
+        else:
+            self._lazy_pending_groups   = []
+            self._lazy_next_group_index = len(all_groups)
+
+        return "".join(self._lazy_rendered_parts)
 
     # ------------------------------------------------------------------ #
     #  Lazy entry loading                                                   #
