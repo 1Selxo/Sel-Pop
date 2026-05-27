@@ -1143,12 +1143,37 @@ class Popup(QWidget):
     # ------------------------------------------------------------------ #
 
     def _on_scroll_lazy_load(self, value: int):
-        """Triggered by the scrollbar — appends the next batch of entry groups
-        when the user has scrolled at least 70% of the way through current content."""
-        if not self._lazy_pending_groups:
+        """Two-tier lazy expansion: senses within rendered groups first,
+        then new entry groups. Triggered at 70% scroll depth."""
+        has_pending_senses = any(
+            any(s[1] < s[2] for s in states)
+            for states in self._rendered_sense_state
+        )
+        if not self._lazy_pending_groups and not has_pending_senses:
             return
+
         sb = self.content_scroll.verticalScrollBar()
-        if sb.maximum() > 0 and value >= sb.maximum() * 0.70:
+        if sb.maximum() <= 0 or value < sb.maximum() * 0.70:
+            return
+
+        # Tier 1: expand senses within already-rendered groups
+        for g_idx, state_list in enumerate(self._rendered_sense_state):
+            for s_idx, (entry_idx, shown, total) in enumerate(state_list):
+                if shown < total:
+                    new_shown = min(shown + self._SENSES_PER_LOAD, total)
+                    state_list[s_idx] = (entry_idx, new_shown, total)
+                    limits = {e_idx: count for (e_idx, count, _) in state_list}
+                    new_html, _ = self._render_one_group(
+                        self._rendered_groups[g_idx],
+                        self._group_indices[g_idx],
+                        sense_limits=limits,
+                    )
+                    self._lazy_rendered_parts[g_idx] = new_html
+                    self._commit_html()
+                    return  # one expansion per scroll tick
+
+        # Tier 2: load new entry groups
+        if self._lazy_pending_groups:
             self._append_next_lazy_batch()
 
     def _commit_html(self):
