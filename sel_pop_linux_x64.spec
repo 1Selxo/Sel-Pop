@@ -4,7 +4,9 @@
 a = Analysis(
     ['src/main.py'],
     pathex=['.'],
-    binaries=[],
+    binaries=[
+        ('native/bin/sel-pop-hoshidicts-server', 'native/bin'),
+    ],
     datas=[
         ('src/ocr/providers/glensv2/provider.py', 'src/ocr/providers/glensv2'),
         ('src/ocr/providers/glensv2/lens_betterproto.py', 'src/ocr/providers/glensv2'),

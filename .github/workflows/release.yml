@@ -1,34 +1,187 @@
-# .github/workflows/release.yaml
 name: Release
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create, for example v1.12.6-selpop.1'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark the GitHub Release as a prerelease'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: '3.12'
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
-  build-windows:
-    uses: ./.github/workflows/build-windows.yml
-  build-linux:
-    uses: ./.github/workflows/build-linux.yml
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            spec: sel_pop_win_x64.spec
+          - os: ubuntu-24.04
+            label: linux-x64
+            spec: sel_pop_linux_x64.spec
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            libegl1 \
+            libgl1 \
+            libxcb-cursor0 \
+            libxcb-randr0 \
+            libxcb-shape0 \
+            libxcb-xfixes0 \
+            libxcb-xinerama0 \
+            libxkbcommon-x11-0
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build HoshiDicts worker on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build_hoshidicts.ps1
+
+      - name: Build HoshiDicts worker on Linux
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S native -B build/hoshidicts -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/hoshidicts --config Release --target sel-pop-hoshidicts-server --parallel
+          mkdir -p native/bin
+          cp build/hoshidicts/sel-pop-hoshidicts-server native/bin/sel-pop-hoshidicts-server
+
+      - name: Run tests
+        run: |
+          python -m compileall -q src tests
+          python -W error::ResourceWarning -m unittest discover -s tests -v
+
+      - name: Build application
+        run: pyinstaller ${{ matrix.spec }} --noconfirm --clean
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "sel-pop-${env:RELEASE_TAG}-${{ matrix.label }}"
+          $root = Join-Path "release" $package
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          Copy-Item -LiteralPath "dist/sel-pop.exe" -Destination $root
+          Copy-Item -LiteralPath "README.md", "LICENSE", "config.example.ini" -Destination $root
+          Compress-Archive -Path (Join-Path $root '*') -DestinationPath "release/$package.zip" -Force
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          package="sel-pop-${RELEASE_TAG}-${{ matrix.label }}"
+          root="release/$package"
+          mkdir -p "$root"
+          cp dist/sel-pop README.md LICENSE config.example.ini "$root/"
+          chmod +x "$root/sel-pop"
+          tar -C release -czf "release/$package.tar.gz" "$package"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sel-pop-${{ env.RELEASE_TAG }}-${{ matrix.label }}
+          path: |
+            release/*.zip
+            release/*.tar.gz
+          if-no-files-found: error
 
   release:
-    needs: [ build-windows, build-linux ]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
     steps:
-      - name: download artifacts
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag for manual releases
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --tags origin
+          existing_sha="$(git rev-list -n 1 "$RELEASE_TAG" 2>/dev/null || true)"
+          if [ -n "$existing_sha" ] && [ "$existing_sha" != "$GITHUB_SHA" ]; then
+            echo "Tag $RELEASE_TAG already exists at $existing_sha, not $GITHUB_SHA." >&2
+            exit 1
+          fi
+          if [ -z "$existing_sha" ]; then
+            git tag "$RELEASE_TAG" "$GITHUB_SHA"
+            git push origin "$RELEASE_TAG"
+          fi
+
+      - name: Download packaged artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts/
-      - name: create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: weikipop ${{ github.ref_name }}
-          generate_release_notes: false # This is the magic line
-          prerelease: ${{ contains(github.ref_name, '-rc') }}
-          files: |
-            artifacts/*/*.zip
-            artifacts/*/*.tar.gz
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease || false }}
+        run: |
+          mapfile -t files < <(find release-artifacts -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release artifacts were downloaded." >&2
+            exit 1
+          fi
+
+          prerelease="false"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            prerelease="$PRERELEASE_INPUT"
+          elif [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease="true"
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            args=(
+              release create "$RELEASE_TAG" "${files[@]}"
+              --repo "$GITHUB_REPOSITORY"
+              --title "Sel-Pop $RELEASE_TAG"
+              --generate-notes
+              --verify-tag
+            )
+            if [ "$prerelease" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            gh "${args[@]}"
+          fi

@@ -92,6 +92,20 @@ Recommended checks before opening a PR:
 - `python -m compileall src`
 - Run the app and verify tray + popup flow
 
+## Releases
+
+GitHub Actions builds Windows and Linux packages and publishes them as GitHub
+Release assets when a `v*` tag is pushed:
+
+```bash
+git tag v1.12.6-selpop.1
+git push origin v1.12.6-selpop.1
+```
+
+You can also run the **Release** workflow manually from GitHub Actions and enter
+the release tag there. Manual runs create the tag at the selected commit if it
+does not already exist.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution standards.
