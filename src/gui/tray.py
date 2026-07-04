@@ -7,6 +7,14 @@ from PyQt6.QtGui import QIcon, QAction, QActionGroup
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 
 from src.config.config import APP_NAME, config, IS_WINDOWS
+from src.dictionary.languages import (
+    enable_all_profiles,
+    enabled_profile_ids,
+    language_label,
+    normalize_dictionary_profiles,
+    normalize_language_code,
+    set_enabled_profile_ids,
+)
 from src.gui.settings_dialog import SettingsDialog
 from src.ocr.ocr import OcrProcessor
 
@@ -45,6 +53,12 @@ class TrayIcon(QSystemTrayIcon):
 
         # Settings Action
         self.menu.addAction("Settings").triggered.connect(self.show_settings)
+
+        self.menu.addSeparator()
+
+        self.profile_menu = self.menu.addMenu("Profiles")
+        self.profile_menu.aboutToShow.connect(self._rebuild_profile_menu)
+        self._rebuild_profile_menu()
 
         self.menu.addSeparator()
 
@@ -182,8 +196,60 @@ class TrayIcon(QSystemTrayIcon):
         if provider_name != config.ocr_provider:
             self.ocr_processor.switch_provider(provider_name)
 
+    def _rebuild_profile_menu(self):
+        self.profile_menu.clear()
+        profiles = normalize_dictionary_profiles(getattr(config, 'dictionary_profiles', []))
+        enabled_ids = enabled_profile_ids(profiles)
+        all_profile_ids = {str(profile.get('id')) for profile in profiles}
+        all_enabled = enabled_ids == all_profile_ids
+        single_enabled_id = next(iter(enabled_ids), None) if len(enabled_ids) == 1 else None
+
+        all_action = self.profile_menu.addAction("All profiles")
+        all_action.setCheckable(True)
+        all_action.setChecked(all_enabled)
+        all_action.triggered.connect(self._enable_all_profiles)
+
+        if len(enabled_ids) > 1 and not all_enabled:
+            custom_action = self.profile_menu.addAction("Custom enabled set")
+            custom_action.setCheckable(True)
+            custom_action.setChecked(True)
+            custom_action.setEnabled(False)
+
+        self.profile_menu.addSeparator()
+
+        for profile in profiles:
+            profile_id = str(profile.get('id'))
+            language = normalize_language_code(profile.get('language'))
+            label = f"{profile.get('name', 'Profile')} ({language})"
+            action = self.profile_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(profile_id == single_enabled_id)
+            action.setToolTip(language_label(language))
+            action.triggered.connect(lambda _checked=False, pid=profile_id: self._enable_single_profile(pid))
+
+        self.profile_menu.addSeparator()
+        self.profile_menu.addAction("Manage Profiles...").triggered.connect(self.show_settings)
+
+    def _enable_single_profile(self, profile_id: str):
+        profiles = set_enabled_profile_ids(getattr(config, 'dictionary_profiles', []), {profile_id})
+        self._apply_profile_selection(profiles)
+
+    def _enable_all_profiles(self):
+        profiles = enable_all_profiles(getattr(config, 'dictionary_profiles', []))
+        self._apply_profile_selection(profiles)
+
+    def _apply_profile_selection(self, profiles):
+        config.dictionary_profiles = profiles
+        config.save()
+        self.lookup.set_dictionary_profiles(profiles)
+        self.lookup.clear_cache()
+        self.reapply_settings()
+        self.ocr_processor.shared_state.screenshot_trigger_event.set()
+
     def reapply_settings(self):
         """Updates the tray menu's checkmarks to reflect the current config."""
+        self._rebuild_profile_menu()
+
         # Update OCR Provider selection
         for action in self.ocr_action_group.actions():
             if action.text() == config.ocr_provider:
@@ -196,6 +262,15 @@ class TrayIcon(QSystemTrayIcon):
             if is_auto_action == config.auto_scan_mode:
                 action.setChecked(True)
                 break
+
+        profiles = normalize_dictionary_profiles(getattr(config, 'dictionary_profiles', []))
+        enabled_names = [
+            str(profile.get('name') or 'Profile')
+            for profile in profiles
+            if profile.get('enabled', True)
+        ]
+        suffix = ', '.join(enabled_names) if enabled_names else 'No profile'
+        self.setToolTip(f'{APP_NAME} - {suffix}')
 
     def show_settings(self):
         settings_dialog = SettingsDialog(self.ocr_processor, self.popup_window, self.input_loop, self.lookup, self, None)

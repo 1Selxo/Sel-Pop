@@ -15,11 +15,13 @@ from src.dictionary.hoshidicts_backend import (
 )
 from src.dictionary.languages import (
     YOMITAN_LANGUAGES,
+    enable_all_profiles,
     enabled_profile_languages,
     infer_dictionary_languages,
     is_text_lookup_worthy,
     is_text_lookup_worthy_for_languages,
     normalize_dictionary_profiles,
+    set_enabled_profile_ids,
     should_lookup_whole_word,
     text_variants_for_language,
 )
@@ -54,6 +56,85 @@ class LanguageProfileTests(unittest.TestCase):
     def test_language_specific_lookup_variants(self):
         self.assertIn('strasse', text_variants_for_language('straße', 'de'))
         self.assertIn('елка', text_variants_for_language('ёлка', 'ru'))
+
+    def test_quick_profile_switch_enables_only_selected_profile(self):
+        profiles = [
+            {'id': 'profile-fr', 'name': 'French', 'language': 'fr', 'enabled': True},
+            {'id': 'profile-zh', 'name': 'Chinese', 'language': 'zh', 'enabled': True},
+        ]
+
+        switched = set_enabled_profile_ids(profiles, {'profile-zh'})
+
+        self.assertEqual(enabled_profile_languages(switched), {'zh'})
+        self.assertFalse(next(profile for profile in switched if profile['id'] == 'profile-fr')['enabled'])
+        self.assertTrue(next(profile for profile in switched if profile['id'] == 'profile-zh')['enabled'])
+        self.assertEqual(enabled_profile_languages(enable_all_profiles(switched)), {'fr', 'zh'})
+
+    def test_switching_profiles_preserves_dictionary_enabled_flags(self):
+        old_profiles = config.dictionary_profiles
+        old_sources = config.dictionary_sources
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                french_path = temp_path / 'french.pkl'
+                chinese_path = temp_path / 'chinese.pkl'
+                write_payload_pickle({
+                    'entries': {},
+                    'lookup_map': {},
+                    'kanji_entries': {},
+                    'deconjugator_rules': [],
+                }, str(french_path))
+                write_payload_pickle({
+                    'entries': {},
+                    'lookup_map': {},
+                    'kanji_entries': {},
+                    'deconjugator_rules': [],
+                }, str(chinese_path))
+
+                config.dictionary_profiles = [
+                    {'id': 'profile-fr', 'name': 'French', 'language': 'fr', 'enabled': True},
+                    {'id': 'profile-zh', 'name': 'Chinese', 'language': 'zh', 'enabled': True},
+                ]
+                config.dictionary_sources = [
+                    {
+                        'id': 'dict-fr',
+                        'name': 'French Dict',
+                        'path': str(french_path),
+                        'enabled': False,
+                        'priority': 0,
+                        'profile_id': 'profile-fr',
+                        'language': 'fr',
+                    },
+                    {
+                        'id': 'dict-zh',
+                        'name': 'Chinese Dict',
+                        'path': str(chinese_path),
+                        'enabled': True,
+                        'priority': 1,
+                        'profile_id': 'profile-zh',
+                        'language': 'zh',
+                    },
+                ]
+
+                lookup = Lookup.__new__(Lookup)
+                lookup._dict_lock = threading.RLock()
+                lookup._dict_file_cache = {}
+                lookup.dictionary = Dictionary()
+                lookup.hoshidicts = HoshiDictsBackend()
+                lookup.lookup_cache = OrderedDict()
+                lookup.CACHE_SIZE = 500
+                lookup.entry_sources = {}
+                lookup.primary_kanji_entries = {}
+
+                lookup.set_dictionary_profiles(set_enabled_profile_ids(config.dictionary_profiles, {'profile-zh'}))
+                sources_by_id = {source['id']: source for source in config.dictionary_sources}
+
+            self.assertFalse(sources_by_id['dict-fr']['enabled'])
+            self.assertTrue(sources_by_id['dict-zh']['enabled'])
+            self.assertEqual(enabled_profile_languages(config.dictionary_profiles), {'zh'})
+        finally:
+            config.dictionary_profiles = old_profiles
+            config.dictionary_sources = old_sources
 
 
 class YomitanImporterTests(unittest.TestCase):

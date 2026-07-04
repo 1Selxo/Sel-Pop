@@ -237,6 +237,24 @@ def enabled_profile_ids(profiles: Iterable[dict[str, Any]]) -> set[str]:
     return {str(profile.get('id')) for profile in profiles if profile.get('enabled', True)}
 
 
+def set_enabled_profile_ids(raw_profiles: Any, enabled_ids: Iterable[str]) -> list[dict[str, Any]]:
+    normalized = normalize_dictionary_profiles(raw_profiles)
+    wanted = {str(profile_id) for profile_id in enabled_ids if str(profile_id)}
+    existing = {str(profile.get('id')) for profile in normalized}
+    if not wanted & existing:
+        wanted = {str(normalized[0].get('id'))}
+    for profile in normalized:
+        profile['enabled'] = str(profile.get('id')) in wanted
+    return normalized
+
+
+def enable_all_profiles(raw_profiles: Any) -> list[dict[str, Any]]:
+    normalized = normalize_dictionary_profiles(raw_profiles)
+    for profile in normalized:
+        profile['enabled'] = True
+    return normalized
+
+
 def enabled_profile_languages(profiles: Iterable[dict[str, Any]]) -> set[str]:
     profile_list = list(profiles)
     if not profile_list:
