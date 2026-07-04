@@ -56,7 +56,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
-            g++ \
+            g++-14 \
             libegl1 \
             libgl1 \
             libxcb-cursor0 \
@@ -79,7 +79,10 @@ jobs:
       - name: Build HoshiDicts worker on Linux
         if: runner.os == 'Linux'
         run: |
-          cmake -S native -B build/hoshidicts -DCMAKE_BUILD_TYPE=Release
+          cmake -S native -B build/hoshidicts \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14
           cmake --build build/hoshidicts --config Release --target sel-pop-hoshidicts-server --parallel
           mkdir -p native/bin
           cp build/hoshidicts/sel-pop-hoshidicts-server native/bin/sel-pop-hoshidicts-server
