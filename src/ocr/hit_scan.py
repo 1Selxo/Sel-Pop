@@ -4,8 +4,13 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Dict, List, Optional
+from typing import List
 
+from src.config.config import config
+from src.dictionary.languages import (
+    enabled_profile_languages,
+    should_lookup_whole_word,
+)
 from src.gui.magpie_manager import magpie_manager
 from src.ocr.interface import Paragraph
 
@@ -50,6 +55,7 @@ class HitScanner(threading.Thread):
         relative_x = mouse_x - mouse_off_x
         relative_y = mouse_y - mouse_off_y
         norm_x, norm_y = relative_x / img_w, relative_y / img_h
+        active_languages = enabled_profile_languages(getattr(config, 'dictionary_profiles', []))
 
         def is_in_box(point, box):
             if not box: return False
@@ -115,7 +121,7 @@ class HitScanner(threading.Thread):
             for word in para.words:
                 if word is target_word:
                     break
-                word_start_index += len(word.text)
+                word_start_index += len(word.text) + len(getattr(word, 'separator', '') or '')
 
             final_char_index = word_start_index + char_offset
             full_text = para.full_text
@@ -133,12 +139,13 @@ class HitScanner(threading.Thread):
 
             word_start_char_index = word_start_index
             lookup_end = word_start_char_index + len(target_word.text)
+            use_whole_word_lookup = should_lookup_whole_word(target_word.text, active_languages)
 
             JAPANESE_PARTICLES = {"の", "を", "に", "が", "は", "で", "と", "から", "まで", "より", "へ", "も", "や", "か"}
             curr_word_idx = target_word_index
             curr_lookup_end = lookup_end
 
-            while curr_word_idx is not None and curr_word_idx < len(words) - 1:
+            while not use_whole_word_lookup and curr_word_idx is not None and curr_word_idx < len(words) - 1:
                 next_word = words[curr_word_idx + 1]
 
                 search_start = curr_lookup_end
@@ -162,7 +169,10 @@ class HitScanner(threading.Thread):
             # can correctly handle verb te-forms like 睨んで / 阻んで, where で is
             # the te-form connector (not the particle で) and must not be stripped.
             # lookup_end is still used below for context/Anki word boundary purposes.
-            lookup_string = full_text[final_char_index:]
+            if use_whole_word_lookup:
+                lookup_string = full_text[word_start_index:]
+            else:
+                lookup_string = full_text[final_char_index:]
 
             merged_context = full_text
             if is_vertical:

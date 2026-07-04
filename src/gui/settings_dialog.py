@@ -1,14 +1,26 @@
 # src/gui/settings_dialog.py
+import uuid
+
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QFontDatabase, QKeySequence
 from PyQt6.QtWidgets import (QWidget, QDialog, QFormLayout, QComboBox, QScrollArea,
                              QSpinBox, QCheckBox, QPushButton, QColorDialog, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QDialogButtonBox, QLabel, QSlider, QDoubleSpinBox,
                              QTabWidget, QSizePolicy, QFontComboBox, QLineEdit,
-                             QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QProgressBar)
+                             QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QProgressBar,
+                             QInputDialog)
 
 from src.dictionary.lookup import Lookup
-from src.config.config import config, APP_NAME, IS_WINDOWS
+from src.dictionary.languages import (
+    LANGUAGE_BY_CODE,
+    YOMITAN_LANGUAGES,
+    language_label,
+    normalize_dictionary_profiles,
+    normalize_language_code,
+    profile_language_map,
+    profile_name_map,
+)
+from src.config.config import APP_NAME, APP_SLUG, config, IS_WINDOWS
 from src.gui.input import InputLoop
 from src.gui.popup import Popup
 from src.ocr.ocr import OcrProcessor
@@ -534,9 +546,11 @@ class SettingsDialog(QDialog):
         self.anki_screenshot_check.setChecked(getattr(config, "enable_screenshot", False))
         anki_layout.addRow("Enable Screenshot:", self.anki_screenshot_check)
 
-        self.anki_meikipop_tag_check = QCheckBox()
-        self.anki_meikipop_tag_check.setChecked(getattr(config, "add_meikipop_tag", True))
-        anki_layout.addRow("Tag with 'weikipop':", self.anki_meikipop_tag_check)
+        self.anki_sel_pop_tag_check = QCheckBox()
+        self.anki_sel_pop_tag_check.setChecked(
+            getattr(config, "add_sel_pop_tag", getattr(config, "add_meikipop_tag", True))
+        )
+        anki_layout.addRow(f"Tag with '{APP_SLUG}':", self.anki_sel_pop_tag_check)
 
         self.anki_doc_title_tag_check = QCheckBox()
         self.anki_doc_title_tag_check.setChecked(getattr(config, "add_document_title_tag", True))
@@ -562,12 +576,34 @@ class SettingsDialog(QDialog):
         self.tab_dictionaries = QWidget()
         self.tab_dictionaries_layout = QVBoxLayout(self.tab_dictionaries)
 
-        dict_help = QLabel(
-            "Import .zip (Yomitan) or .pkl dictionaries, enable/disable them with the checkbox, and set lookup priority order.\n"
-            "Disabling keeps files intact. Use Delete to remove an imported dictionary file."
-        )
-        dict_help.setWordWrap(True)
-        self.tab_dictionaries_layout.addWidget(dict_help)
+        profiles_group = QGroupBox("Language Profiles")
+        profiles_layout = QVBoxLayout()
+
+        self.profile_list = QListWidget()
+        self.profile_list.setSelectionMode(self.profile_list.SelectionMode.SingleSelection)
+        profiles_layout.addWidget(self.profile_list)
+
+        profile_btn_row = QHBoxLayout()
+        self.add_profile_btn = QPushButton("Add Profile...")
+        self.add_profile_btn.clicked.connect(self._add_profile)
+        self.rename_profile_btn = QPushButton("Rename")
+        self.rename_profile_btn.clicked.connect(self._rename_profile)
+        self.delete_profile_btn = QPushButton("Delete")
+        self.delete_profile_btn.clicked.connect(self._delete_profile)
+        profile_btn_row.addWidget(self.add_profile_btn)
+        profile_btn_row.addWidget(self.rename_profile_btn)
+        profile_btn_row.addWidget(self.delete_profile_btn)
+        profiles_layout.addLayout(profile_btn_row)
+
+        import_profile_layout = QFormLayout()
+        self.form_layouts.append(import_profile_layout)
+        self.import_profile_combo = QComboBox()
+        self._set_expanding(self.import_profile_combo)
+        import_profile_layout.addRow("New imports:", self.import_profile_combo)
+        profiles_layout.addLayout(import_profile_layout)
+
+        profiles_group.setLayout(profiles_layout)
+        self.tab_dictionaries_layout.addWidget(profiles_group)
 
         self.dictionary_list = QListWidget()
         self.dictionary_list.setSelectionMode(self.dictionary_list.SelectionMode.SingleSelection)
@@ -576,6 +612,8 @@ class SettingsDialog(QDialog):
         dict_btn_row = QHBoxLayout()
         self.import_btn = QPushButton("Import Dictionary Files…")
         self.import_btn.clicked.connect(self._import_dictionaries)
+        self.assign_profile_btn = QPushButton("Set Profile...")
+        self.assign_profile_btn.clicked.connect(self._assign_dictionary_profile)
         up_btn = QPushButton("Move Up")
         up_btn.clicked.connect(self._move_dictionary_up)
         down_btn = QPushButton("Move Down")
@@ -584,6 +622,7 @@ class SettingsDialog(QDialog):
         self.remove_btn.clicked.connect(self._remove_dictionary)
 
         dict_btn_row.addWidget(self.import_btn)
+        dict_btn_row.addWidget(self.assign_profile_btn)
         dict_btn_row.addWidget(up_btn)
         dict_btn_row.addWidget(down_btn)
         dict_btn_row.addWidget(self.remove_btn)
@@ -602,10 +641,15 @@ class SettingsDialog(QDialog):
         self.dict_progress_bar.hide()
         self.tab_dictionaries_layout.addWidget(self.dict_progress_bar)
 
+        self._dictionary_profiles = self.lookup.get_dictionary_profiles()
         self._dictionary_sources = self.lookup.get_dictionary_sources()
+        self._refresh_profile_list()
+        self._refresh_import_profile_combo()
         self._refresh_dictionary_list()
         # Track whether the user has made any dictionary changes that require a reload
         self._dictionaries_modified = False
+        self._profiles_modified = False
+        self.profile_list.itemChanged.connect(self._on_profile_item_changed)
         self.dictionary_list.itemChanged.connect(self._on_dictionary_item_changed)
         self.tab_dictionaries_layout.addStretch()
 
@@ -711,11 +755,144 @@ class SettingsDialog(QDialog):
             self._update_color_buttons()
             self._mark_as_custom()
 
+    def _refresh_profile_list(self):
+        self.profile_list.blockSignals(True)
+        self.profile_list.clear()
+        self._dictionary_profiles = normalize_dictionary_profiles(self._dictionary_profiles)
+        for profile in self._dictionary_profiles:
+            language = normalize_language_code(profile.get('language'))
+            label = f"{profile.get('name', 'Profile')} - {language_label(language)}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, dict(profile))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if profile.get('enabled', True) else Qt.CheckState.Unchecked)
+            self.profile_list.addItem(item)
+        self.profile_list.blockSignals(False)
+
+    def _refresh_import_profile_combo(self):
+        current_profile_id = self.import_profile_combo.currentData()
+        self.import_profile_combo.blockSignals(True)
+        self.import_profile_combo.clear()
+        self.import_profile_combo.addItem("Detect from dictionary", None)
+        for profile in self._dictionary_profiles:
+            language = normalize_language_code(profile.get('language'))
+            label = f"{profile.get('name', 'Profile')} ({language})"
+            self.import_profile_combo.addItem(label, profile.get('id'))
+        if current_profile_id is not None:
+            index = self.import_profile_combo.findData(current_profile_id)
+            if index >= 0:
+                self.import_profile_combo.setCurrentIndex(index)
+        self.import_profile_combo.blockSignals(False)
+
+    def _sync_profiles_from_list(self):
+        synced = []
+        for idx in range(self.profile_list.count()):
+            item = self.profile_list.item(idx)
+            profile = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+            profile['enabled'] = item.checkState() == Qt.CheckState.Checked
+            synced.append(profile)
+        self._dictionary_profiles = normalize_dictionary_profiles(synced)
+
+    def _add_profile(self):
+        labels = [language_label(language.code) for language in YOMITAN_LANGUAGES]
+        default_index = next((i for i, language in enumerate(YOMITAN_LANGUAGES) if language.code == 'en'), 0)
+        choice, ok = QInputDialog.getItem(
+            self,
+            'Add language profile',
+            'Language:',
+            labels,
+            default_index,
+            False,
+        )
+        if not ok or not choice:
+            return
+
+        language_code = choice.rsplit('(', 1)[-1].rstrip(')').strip()
+        language = LANGUAGE_BY_CODE.get(language_code, LANGUAGE_BY_CODE['xxx'])
+        name, ok = QInputDialog.getText(
+            self,
+            'Profile name',
+            'Name:',
+            text=language.name,
+        )
+        if not ok:
+            return
+
+        profile_id = f"profile-{language.code}-{uuid.uuid4().hex[:8]}"
+        self._dictionary_profiles.append({
+            'id': profile_id,
+            'name': name.strip() or language.name,
+            'language': language.code,
+            'enabled': True,
+        })
+        self._profiles_modified = True
+        self._refresh_profile_list()
+        self._refresh_import_profile_combo()
+
+    def _rename_profile(self):
+        row = self.profile_list.currentRow()
+        if row < 0:
+            return
+        item = self.profile_list.item(row)
+        profile = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        name, ok = QInputDialog.getText(
+            self,
+            'Rename profile',
+            'Name:',
+            text=profile.get('name', 'Profile'),
+        )
+        if not ok:
+            return
+        profile['name'] = name.strip() or profile.get('name', 'Profile')
+        item.setData(Qt.ItemDataRole.UserRole, profile)
+        self._sync_profiles_from_list()
+        self._profiles_modified = True
+        self._refresh_profile_list()
+        self._refresh_import_profile_combo()
+        self._refresh_dictionary_list()
+
+    def _delete_profile(self):
+        row = self.profile_list.currentRow()
+        if row < 0:
+            return
+        if len(self._dictionary_profiles) <= 1:
+            QMessageBox.information(self, 'Cannot delete profile', 'At least one language profile is required.')
+            return
+
+        item = self.profile_list.item(row)
+        profile = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        profile_id = profile.get('id')
+        attached = [s for s in self._dictionary_sources if s.get('profile_id') == profile_id]
+        if attached:
+            QMessageBox.information(
+                self,
+                'Cannot delete profile',
+                'Use Set Profile or delete dictionaries in this profile before deleting it.',
+            )
+            return
+
+        del self._dictionary_profiles[row]
+        self._profiles_modified = True
+        self._refresh_profile_list()
+        self._refresh_import_profile_combo()
+        self._refresh_dictionary_list()
+
+    def _on_profile_item_changed(self, item):
+        self._profiles_modified = True
+        self._sync_profiles_from_list()
+
     def _refresh_dictionary_list(self):
         self.dictionary_list.blockSignals(True)
         self.dictionary_list.clear()
+        profile_names = profile_name_map(self._dictionary_profiles)
+        profile_languages = profile_language_map(self._dictionary_profiles)
         for source in sorted(self._dictionary_sources, key=lambda s: int(s.get('priority', 0))):
-            label = source.get('name', 'Dictionary')
+            profile_id = source.get('profile_id', '')
+            language = normalize_language_code(source.get('language') or profile_languages.get(profile_id))
+            profile_name = profile_names.get(profile_id, 'Profile')
+            label = f"{profile_name} ({language}) - {source.get('name', 'Dictionary')}"
+            if source.get('kind') == 'hoshidicts':
+                label += ' [Hoshi]'
             if source.get('builtin'):
                 label += ' (built-in)'
             item = QListWidgetItem(label)
@@ -742,7 +919,12 @@ class SettingsDialog(QDialog):
     def _set_dict_ui_busy(self, busy: bool, message: str = ""):
         """Disable/enable dict buttons and show/hide the status label + progress bar."""
         self.import_btn.setEnabled(not busy)
+        self.assign_profile_btn.setEnabled(not busy)
         self.remove_btn.setEnabled(not busy)
+        self.add_profile_btn.setEnabled(not busy)
+        self.rename_profile_btn.setEnabled(not busy)
+        self.delete_profile_btn.setEnabled(not busy)
+        self.import_profile_combo.setEnabled(not busy)
         if busy:
             self.dict_status_label.setText(message)
             self.dict_status_label.show()
@@ -771,8 +953,16 @@ class SettingsDialog(QDialog):
         if not paths:
             return
 
+        self._sync_profiles_from_list()
         self._set_dict_ui_busy(True, "Importing dictionaries, please wait…")
-        self._dict_worker = _DictWorker(self.lookup.import_dictionary_files, paths)
+        profile_id = self.import_profile_combo.currentData()
+        profiles_snapshot = list(self._dictionary_profiles)
+        self._dict_worker = _DictWorker(
+            self.lookup.import_dictionary_files,
+            paths,
+            profile_id=profile_id,
+            dictionary_profiles=profiles_snapshot,
+        )
         self._dict_worker.progress.connect(self._on_dict_progress)
         self._dict_worker.finished.connect(self._on_import_done)
         self._dict_worker.start()
@@ -783,8 +973,11 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, 'Import error', report['_worker_error'])
             return
 
+        self._dictionary_profiles = self.lookup.get_dictionary_profiles()
         self._dictionary_sources = self.lookup.get_dictionary_sources()
         self._dictionaries_modified = True
+        self._refresh_profile_list()
+        self._refresh_import_profile_combo()
         self._refresh_dictionary_list()
 
         imported_count = len(report.get('imported', []))
@@ -821,6 +1014,43 @@ class SettingsDialog(QDialog):
         self._dictionaries_modified = True
         self._sync_dictionary_sources_from_list()
 
+    def _assign_dictionary_profile(self):
+        row = self.dictionary_list.currentRow()
+        if row < 0:
+            return
+
+        self._sync_profiles_from_list()
+        item = self.dictionary_list.item(row)
+        source = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        current_profile_id = source.get('profile_id')
+        labels = [
+            f"{profile.get('name', 'Profile')} ({normalize_language_code(profile.get('language'))})"
+            for profile in self._dictionary_profiles
+        ]
+        current_index = next(
+            (idx for idx, profile in enumerate(self._dictionary_profiles) if profile.get('id') == current_profile_id),
+            0,
+        )
+        choice, ok = QInputDialog.getItem(
+            self,
+            'Set dictionary profile',
+            'Profile:',
+            labels,
+            current_index,
+            False,
+        )
+        if not ok or not choice:
+            return
+
+        selected_index = labels.index(choice)
+        selected_profile = self._dictionary_profiles[selected_index]
+        source['profile_id'] = selected_profile.get('id')
+        source['language'] = normalize_language_code(selected_profile.get('language'))
+        item.setData(Qt.ItemDataRole.UserRole, source)
+        self._sync_dictionary_sources_from_list()
+        self._dictionaries_modified = True
+        self._refresh_dictionary_list()
+
     def _remove_dictionary(self):
         row = self.dictionary_list.currentRow()
         if row < 0:
@@ -835,7 +1065,7 @@ class SettingsDialog(QDialog):
         confirm = QMessageBox.question(
             self,
             'Confirm dictionary deletion',
-            f"Delete '{name}' from Weikipop?\n\n"
+            f"Delete '{name}' from {APP_NAME}?\n\n"
             "This removes the imported dictionary file from disk. "
             "Use the checkbox to disable without deleting.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
@@ -914,7 +1144,8 @@ class SettingsDialog(QDialog):
         config.model_name            = self.anki_model_combo.currentText().strip() or "Basic"
         config.prevent_duplicates    = self.anki_prevent_dup_check.isChecked()
         config.enable_screenshot     = self.anki_screenshot_check.isChecked()
-        config.add_meikipop_tag      = self.anki_meikipop_tag_check.isChecked()
+        config.add_sel_pop_tag      = self.anki_sel_pop_tag_check.isChecked()
+        config.add_meikipop_tag     = config.add_sel_pop_tag
         config.add_document_title_tag = self.anki_doc_title_tag_check.isChecked()
         config.anki_field_map = {
             field: combo.currentText()
@@ -922,8 +1153,15 @@ class SettingsDialog(QDialog):
             if combo.currentText()
         }
 
+        if self._profiles_modified:
+            self._sync_profiles_from_list()
+        if self._dictionaries_modified:
+            self._sync_dictionary_sources_from_list()
+        config.dictionary_profiles = list(self._dictionary_profiles)
+        config.dictionary_sources = list(self._dictionary_sources)
+
         # Only re-save and reload dictionary sources when the user actually changed
-        # something in the Dictionaries tab (reorder, toggle enabled, import, delete).
+        # something in the Dictionaries tab (profiles, reorder, toggle, import, delete).
         # The reload is the expensive part — run it in a background thread so the
         # settings dialog closes immediately without freezing the UI.
         config.save()
@@ -932,21 +1170,23 @@ class SettingsDialog(QDialog):
         self.tray_icon.reapply_settings()
         self.ocr_processor.shared_state.screenshot_trigger_event.set()
 
-        if self._dictionaries_modified:
-            self._sync_dictionary_sources_from_list()
+        reload_dictionaries = self._dictionaries_modified or self._profiles_modified
+        if reload_dictionaries:
             sources_snapshot = list(self._dictionary_sources)
+            profiles_snapshot = list(self._dictionary_profiles)
             self.accept()   # close dialog NOW — dict reload happens in background
 
-            def _reload(sources, progress_cb=None):
+            def _reload(sources, profiles, progress_cb=None):
+                config.dictionary_profiles = profiles
                 self.lookup.set_dictionary_sources(sources, progress_cb=progress_cb)
                 self.lookup.clear_cache()
 
-            self._dict_worker = _DictWorker(_reload, sources_snapshot)
+            self._dict_worker = _DictWorker(_reload, sources_snapshot, profiles_snapshot)
             self._dict_worker.start()
         else:
             self.accept()
 
-    MEIKIPOP_SOURCE_FIELDS = [
+    SEL_POP_SOURCE_FIELDS = [
         "",
         "{expression}",        # kanji/kana form of the word
         "{reading}",           # kana reading
@@ -1020,10 +1260,10 @@ class SettingsDialog(QDialog):
         for field in fields:
             combo = QComboBox()
             combo.setEditable(True)
-            combo.addItems(self.MEIKIPOP_SOURCE_FIELDS)
+            combo.addItems(self.SEL_POP_SOURCE_FIELDS)
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             val = existing.get(field, "")
-            if val in self.MEIKIPOP_SOURCE_FIELDS:
+            if val in self.SEL_POP_SOURCE_FIELDS:
                 combo.setCurrentText(val)
             elif val:
                 combo.setCurrentText(val)

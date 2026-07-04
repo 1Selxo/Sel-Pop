@@ -1,9 +1,9 @@
 @echo off
 cd /d "%~dp0"
-title Weikipop Builder
+title Sel-Pop Builder
 
 echo ============================================================
-echo  Weikipop Build Script
+echo  Sel-Pop Build Script
 echo ============================================================
 echo.
 
@@ -60,10 +60,10 @@ if errorlevel 1 (
 :: Run PyInstaller
 echo.
 echo ============================================================
-echo  Building weikipop.exe...
+echo  Building sel-pop.exe...
 echo ============================================================
 echo.
-pyinstaller weikipop_win_x64.spec --noconfirm
+pyinstaller sel_pop_win_x64.spec --noconfirm
 if errorlevel 1 (
     echo.
     echo ERROR: PyInstaller build failed. See the output above.
@@ -86,7 +86,7 @@ start explorer.exe
 
 echo.
 echo ============================================================
-echo  Done! dist\ contains weikipop.exe and dictionary.pkl
+echo  Done! dist\ contains sel-pop.exe and dictionary.pkl
 echo ============================================================
 echo.
 pause

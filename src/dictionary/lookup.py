@@ -1,4 +1,5 @@
 # lookup.py - Optimized version
+import json
 import logging
 import math
 import os
@@ -8,16 +9,42 @@ import shutil
 import threading
 import time
 import uuid
+import zlib
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.config.config import config, MAX_DICT_ENTRIES
 from src.dictionary.customdict import Dictionary, WRITTEN_FORM_INDEX, READING_INDEX, FREQUENCY_INDEX, ENTRY_ID_INDEX, DEFAULT_FREQ
 from src.dictionary.deconjugator import Deconjugator, Form
+from src.dictionary.hoshidicts_backend import (
+    HoshiDictsBackend,
+    find_hoshidicts_server,
+    import_hoshidicts_archive,
+)
+from src.dictionary.languages import (
+    BUILTIN_DICTIONARY_ID,
+    DEFAULT_PROFILE_ID,
+    clean_lookup_token,
+    enabled_profile_ids,
+    infer_dictionary_languages,
+    language_label,
+    normalize_dictionary_profiles,
+    normalize_language_code,
+    profile_language_map,
+    profile_name_map,
+    should_lookup_whole_word,
+)
 from src.dictionary.yomitan_client import YomitanClient
-from src.dictionary.yomitan_importer import convert_yomitan_zip_to_payload, write_payload_pickle
+from src.dictionary.yomitan_importer import (
+    convert_yomitan_zip_to_payload,
+    extract_glosses,
+    read_yomitan_index,
+    read_yomitan_stylesheet,
+    write_payload_pickle,
+)
+from src.dictionary.yomitan_language_engine import expand_yomitan_forms
 
 KANJI_REGEX = re.compile(r'[\u4e00-\u9faf]')
 JAPANESE_SEPARATORS = {
@@ -42,6 +69,9 @@ class DictionaryEntry:
     match_len: int = 0  # Add match_len field for Yomitan entries
     dictionary_name: str = ''
     dictionary_id: str = ''
+    language: str = 'ja'
+    profile_name: str = ''
+    dictionary_priority: int = 9999
 
 
 @dataclass
@@ -88,8 +118,10 @@ class Lookup(threading.Thread):
         self._dict_file_cache: Dict[str, tuple] = {}  # path -> (mtime, Dictionary)
 
         self.dictionary = Dictionary()
+        self.hoshidicts = HoshiDictsBackend()
         self.lookup_cache: OrderedDict = OrderedDict()
         self.CACHE_SIZE = 500
+        config.dictionary_profiles = self.get_dictionary_profiles()
         self._load_configured_dictionaries()
         self.deconjugator = Deconjugator(self.dictionary.deconjugator_rules)
 
@@ -115,26 +147,105 @@ class Lookup(threading.Thread):
         with self._dict_lock:
             self.lookup_cache = OrderedDict()
 
+    def get_dictionary_profiles(self) -> List[Dict[str, Any]]:
+        return normalize_dictionary_profiles(getattr(config, 'dictionary_profiles', []))
+
+    def set_dictionary_profiles(self, profiles: List[Dict[str, Any]]):
+        normalized = normalize_dictionary_profiles(profiles)
+        config.dictionary_profiles = normalized
+
+        profile_ids = {profile['id'] for profile in normalized}
+        language_by_profile = profile_language_map(normalized)
+        fallback_profile_id = DEFAULT_PROFILE_ID if DEFAULT_PROFILE_ID in profile_ids else normalized[0]['id']
+        sources = self.get_dictionary_sources()
+        for source in sources:
+            profile_id = source.get('profile_id') or DEFAULT_PROFILE_ID
+            if profile_id not in profile_ids:
+                profile_id = fallback_profile_id
+            source['profile_id'] = profile_id
+            source['language'] = normalize_language_code(source.get('language') or language_by_profile.get(profile_id))
+        config.dictionary_sources = sources
+        config.save()
+        self._load_configured_dictionaries()
+
+    def _ensure_profile_for_language(self, language: str) -> str:
+        language = normalize_language_code(language)
+        profiles = self.get_dictionary_profiles()
+        for profile in profiles:
+            if normalize_language_code(profile.get('language')) == language:
+                return profile['id']
+
+        profile_id = f'profile-{language}'
+        existing_ids = {profile.get('id') for profile in profiles}
+        counter = 2
+        unique_profile_id = profile_id
+        while unique_profile_id in existing_ids:
+            unique_profile_id = f'{profile_id}-{counter}'
+            counter += 1
+
+        profiles.append({
+            'id': unique_profile_id,
+            'name': language_label(language).rsplit(' ', 1)[0],
+            'language': language,
+            'enabled': True,
+        })
+        config.dictionary_profiles = profiles
+        return unique_profile_id
+
     def _default_dictionary_sources(self) -> List[Dict[str, Any]]:
         return [{
-            'id': 'builtin-main',
+            'id': BUILTIN_DICTIONARY_ID,
             'name': 'Main Dictionary',
             'path': 'dictionary.pkl',
             'enabled': True,
             'priority': 0,
             'kind': 'pickle',
             'builtin': True,
+            'profile_id': DEFAULT_PROFILE_ID,
+            'language': 'ja',
+            'target_language': 'en',
         }]
 
     def get_dictionary_sources(self) -> List[Dict[str, Any]]:
         sources = getattr(config, 'dictionary_sources', []) or []
         if not sources:
             sources = self._default_dictionary_sources()
+        profiles = self.get_dictionary_profiles()
+        language_by_profile = profile_language_map(profiles)
+        profile_ids = set(language_by_profile)
+        fallback_profile_id = DEFAULT_PROFILE_ID if DEFAULT_PROFILE_ID in profile_ids else profiles[0]['id']
+        normalized = []
+        for idx, source in enumerate(sources):
+            profile_id = source.get('profile_id') or DEFAULT_PROFILE_ID
+            if profile_id not in profile_ids:
+                profile_id = fallback_profile_id
+            language = normalize_language_code(source.get('language') or language_by_profile.get(profile_id) or 'ja')
+            normalized.append({
+                'id': source.get('id') or str(uuid.uuid4()),
+                'name': (source.get('name') or 'Dictionary').strip(),
+                'path': source.get('path') or '',
+                'enabled': bool(source.get('enabled', True)),
+                'priority': int(source.get('priority', idx)),
+                'kind': source.get('kind') or 'pickle',
+                'builtin': bool(source.get('builtin', False)),
+                'profile_id': profile_id,
+                'language': language,
+                'target_language': normalize_language_code(source.get('target_language') or 'xxx'),
+            })
+        sources = normalized
         return sorted(sources, key=lambda x: int(x.get('priority', 0)))
 
     def set_dictionary_sources(self, sources: List[Dict[str, Any]], progress_cb=None):
+        profiles = self.get_dictionary_profiles()
+        language_by_profile = profile_language_map(profiles)
+        profile_ids = {profile['id'] for profile in profiles}
+        fallback_profile_id = DEFAULT_PROFILE_ID if DEFAULT_PROFILE_ID in profile_ids else profiles[0]['id']
         normalized = []
         for idx, source in enumerate(sources):
+            profile_id = source.get('profile_id') or DEFAULT_PROFILE_ID
+            if profile_id not in profile_ids:
+                profile_id = fallback_profile_id
+            language = normalize_language_code(source.get('language') or language_by_profile.get(profile_id) or 'ja')
             normalized.append({
                 'id': source.get('id') or str(uuid.uuid4()),
                 'name': (source.get('name') or 'Dictionary').strip(),
@@ -143,6 +254,9 @@ class Lookup(threading.Thread):
                 'priority': idx,
                 'kind': source.get('kind') or 'pickle',
                 'builtin': bool(source.get('builtin', False)),
+                'profile_id': profile_id,
+                'language': language,
+                'target_language': normalize_language_code(source.get('target_language') or 'xxx'),
             })
 
         has_builtin = any(s.get('builtin') for s in normalized)
@@ -175,8 +289,14 @@ class Lookup(threading.Thread):
             try:
                 p = Path(path)
                 # Only remove imported dictionary files inside managed directory.
-                if p.exists() and self.user_dictionary_dir.resolve() in p.resolve().parents:
-                    p.unlink()
+                managed_root = self.user_dictionary_dir.resolve()
+                resolved_path = p.resolve()
+                if p.exists() and managed_root in resolved_path.parents:
+                    self.hoshidicts.close()
+                    if p.is_dir():
+                        shutil.rmtree(p)
+                    else:
+                        p.unlink()
             except Exception as exc:
                 return False, f'Failed to delete dictionary file: {exc}'
 
@@ -184,14 +304,26 @@ class Lookup(threading.Thread):
         self.set_dictionary_sources(remaining)
         return True, ''
 
-    def import_dictionary_files(self, file_paths: List[str], progress_cb=None) -> Dict[str, Any]:
+    def import_dictionary_files(
+        self,
+        file_paths: List[str],
+        progress_cb=None,
+        profile_id: Optional[str] = None,
+        dictionary_profiles: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         report = {'imported': [], 'failed': [], 'skipped': []}
         if not file_paths:
             return report
 
+        if dictionary_profiles is not None:
+            config.dictionary_profiles = normalize_dictionary_profiles(dictionary_profiles)
+
         sources = self.get_dictionary_sources()
         existing_names = {s.get('name', '').lower(): s for s in sources}
         n_files = len(file_paths)
+        profiles = self.get_dictionary_profiles()
+        language_by_profile = profile_language_map(profiles)
+        selected_profile_id = profile_id if profile_id in language_by_profile else None
 
         for i, file_path in enumerate(file_paths):
             if progress_cb:
@@ -207,21 +339,71 @@ class Lookup(threading.Thread):
                     report['failed'].append((file_path, 'Unsupported file type'))
                     continue
 
+                metadata = {}
+                source_kind = 'pickle'
                 if suffix == '.zip':
-                    payload, suggested_name = convert_yomitan_zip_to_payload(str(path), dict_index=0)
+                    index_meta = read_yomitan_index(str(path))
+                    suggested_name = index_meta.get('title') or path.stem
                     safe_name = self._unique_dictionary_name(suggested_name, existing_names)
-                    out_path = self.user_dictionary_dir / f'{safe_name}.pkl'
-                    write_payload_pickle(payload, str(out_path))
                     source_name = safe_name
+                    metadata = dict(index_meta)
+
+                    if find_hoshidicts_server() is not None:
+                        import_root = self.user_dictionary_dir / '.hoshidicts-import' / uuid.uuid4().hex
+                        import_root.mkdir(parents=True, exist_ok=True)
+                        try:
+                            imported = import_hoshidicts_archive(str(path), str(import_root))
+                            generated_path = Path(imported['path'])
+                            out_path = self.user_dictionary_dir / f'{safe_name}.hoshidict'
+                            if out_path.exists():
+                                shutil.rmtree(out_path)
+                            shutil.move(str(generated_path), str(out_path))
+                            index_path = out_path / 'index.json'
+                            native_index = json.loads(index_path.read_text(encoding='utf-8'))
+                            native_index['title'] = safe_name
+                            index_path.write_text(
+                                json.dumps(native_index, ensure_ascii=False),
+                                encoding='utf-8',
+                            )
+                            source_kind = 'hoshidicts'
+                        except Exception as exc:
+                            logger.warning('HoshiDicts import failed; using pickle fallback: %s', exc)
+                            native_path = self.user_dictionary_dir / f'{safe_name}.hoshidict'
+                            if native_path.exists():
+                                shutil.rmtree(native_path)
+                        finally:
+                            if import_root.exists():
+                                shutil.rmtree(import_root)
+
+                    if source_kind != 'hoshidicts':
+                        payload, _ = convert_yomitan_zip_to_payload(str(path), dict_index=0)
+                        out_path = self.user_dictionary_dir / f'{safe_name}.pkl'
+                        write_payload_pickle(payload, str(out_path))
+                        stylesheet = read_yomitan_stylesheet(str(path))
+                        if stylesheet:
+                            out_path.with_suffix('.css').write_text(stylesheet, encoding='utf-8')
                 else:
                     with open(path, 'rb') as file:
                         payload = pickle.load(file)
                     if 'entries' not in payload or 'lookup_map' not in payload:
                         report['failed'].append((file_path, 'Invalid dictionary pickle format'))
                         continue
+                    metadata = payload.get('metadata', {})
                     source_name = self._unique_dictionary_name(path.stem, existing_names)
                     out_path = self.user_dictionary_dir / f'{source_name}.pkl'
                     shutil.copyfile(path, out_path)
+
+                declared_source_language, target_language = infer_dictionary_languages(
+                    metadata,
+                    source_name,
+                    path.stem,
+                )
+                effective_profile_id = selected_profile_id
+                if effective_profile_id is None:
+                    effective_profile_id = self._ensure_profile_for_language(declared_source_language)
+                    profiles = self.get_dictionary_profiles()
+                    language_by_profile = profile_language_map(profiles)
+                source_language = normalize_language_code(language_by_profile.get(effective_profile_id))
 
                 source = {
                     'id': str(uuid.uuid4()),
@@ -229,8 +411,11 @@ class Lookup(threading.Thread):
                     'path': str(out_path),
                     'enabled': True,
                     'priority': len(sources),
-                    'kind': 'pickle',
+                    'kind': source_kind,
                     'builtin': False,
+                    'profile_id': effective_profile_id,
+                    'language': source_language,
+                    'target_language': target_language,
                 }
                 sources.append(source)
                 existing_names[source_name.lower()] = source
@@ -261,6 +446,9 @@ class Lookup(threading.Thread):
     def _load_configured_dictionaries(self, progress_cb=None):
         with self._dict_lock:
             sources = self.get_dictionary_sources()
+            profiles = self.get_dictionary_profiles()
+            enabled_profiles = enabled_profile_ids(profiles)
+            profile_names = profile_name_map(profiles)
 
             combined_entries: Dict[int, list] = {}
             combined_lookup_map: Dict[str, list] = {}
@@ -269,10 +457,23 @@ class Lookup(threading.Thread):
             self.entry_sources = {}
 
             next_entry_id = 1
-            enabled_sources = [s for s in sources if s.get('enabled', True)]
-            if not enabled_sources:
-                enabled_sources = self._default_dictionary_sources()
-
+            enabled_sources = [
+                s for s in sources
+                if s.get('enabled', True) and (s.get('profile_id') or DEFAULT_PROFILE_ID) in enabled_profiles
+            ]
+            native_sources = [
+                {
+                    **source,
+                    'profile_name': profile_names.get(source.get('profile_id'), ''),
+                }
+                for source in enabled_sources
+                if source.get('kind') == 'hoshidicts'
+            ]
+            self.hoshidicts.reload(native_sources)
+            enabled_sources = [
+                source for source in enabled_sources
+                if source.get('kind') != 'hoshidicts'
+            ]
             n_sources = len(enabled_sources)
 
             for source_index, source in enumerate(sorted(enabled_sources, key=lambda x: int(x.get('priority', 0)))):
@@ -307,6 +508,8 @@ class Lookup(threading.Thread):
                     'dictionary_name':     source.get('name', 'Dictionary'),
                     'dictionary_id':       source.get('id', ''),
                     'dictionary_priority': source_index,
+                    'language':            normalize_language_code(source.get('language')),
+                    'profile_name':        profile_names.get(source.get('profile_id'), ''),
                 }
 
                 # Build id_map in one comprehension and assign sequential global IDs.
@@ -348,7 +551,11 @@ class Lookup(threading.Thread):
             self.dictionary.deconjugator_rules = combined_deconj_rules or []
             self.dictionary._is_loaded = True
 
-            if not self.dictionary.deconjugator_rules:
+            has_japanese_pickle = any(
+                normalize_language_code(source.get('language')) == 'ja'
+                for source in enabled_sources
+            )
+            if not self.dictionary.deconjugator_rules and has_japanese_pickle:
                 try:
                     fallback = Dictionary()
                     if fallback.load_dictionary('dictionary.pkl'):
@@ -404,12 +611,7 @@ class Lookup(threading.Thread):
         logger.info(f"Looking up: {lookup_string}")
 
         # Fast path: clean the text
-        text = lookup_string.strip()
-        text = text[:config.max_lookup_length]
-        for i, ch in enumerate(text):
-            if ch in JAPANESE_SEPARATORS:
-                text = text[:i]
-                break
+        text = self._trim_lookup_text(lookup_string)
         if not text:
             return []
 
@@ -447,7 +649,19 @@ class Lookup(threading.Thread):
         Optimized lookup that always uses local dictionaries and optionally
         appends Yomitan API results.
         """
-        results = self._do_lookup(text)
+        results = []
+        seen_result_keys = set()
+        for language in self._enabled_lookup_languages():
+            for entry in self._do_lookup(text, language):
+                key = (
+                    getattr(entry, 'written_form', ''),
+                    getattr(entry, 'reading', ''),
+                    getattr(entry, 'dictionary_id', ''),
+                )
+                if key in seen_result_keys:
+                    continue
+                seen_result_keys.add(key)
+                results.append(entry)
 
         # Check if Yomitan is usable (cached result)
         if self._yomitan_enabled:
@@ -476,6 +690,27 @@ class Lookup(threading.Thread):
                 results.extend(yomitan_entries)
 
         return results[:MAX_DICT_ENTRIES]
+
+    def _enabled_lookup_languages(self) -> List[str]:
+        profiles = self.get_dictionary_profiles()
+        languages = []
+        for profile in profiles:
+            if not profile.get('enabled', True):
+                continue
+            language = normalize_language_code(profile.get('language'))
+            if language not in languages:
+                languages.append(language)
+        return languages
+
+    @staticmethod
+    def _trim_lookup_text(lookup_string: str) -> str:
+        text = (lookup_string or '').strip()
+        text = text[:config.max_lookup_length]
+        for i, ch in enumerate(text):
+            if ch in JAPANESE_SEPARATORS:
+                text = text[:i]
+                break
+        return clean_lookup_token(text)
 
     def _lookup_yomitan_optimized(self, lookup_string: str) -> List[Any]:
         """
@@ -523,20 +758,21 @@ class Lookup(threading.Thread):
 
         return found_entries
 
-    def _do_lookup(self, text: str) -> List[DictionaryEntry]:
+    def _do_lookup(self, text: str, language: str = 'ja') -> List[DictionaryEntry]:
         """
         Scan all prefixes of `text` (longest first), deconjugate each, then
         look up every resulting form in the kanji / kana maps.
 
         Collected results are keyed by entry_id and later merged/sorted by
         (written_form, reading) in _format_and_sort. Every prefix length is
-        scanned (matching meikipop's behavior) because the correct entry for
+        scanned (matching the legacy lookup behavior) because the correct entry for
         the on-screen word is often only reachable via deconjugation at a
         much shorter prefix than the longest literal match — an early-exit
         cutoff based on the first match's length can prune that shorter,
         correct match before it's ever tried, causing missed lookups.
         """
         collected: Dict[int, Tuple[tuple, Form, int]] = {}
+        native_collected: Dict[Tuple[str, str, str], DictionaryEntry] = {}
         found_primary_match = False
         # Per-call cache for _get_map_entries — avoids repeated hira/kata
         # conversions when the same form text appears across multiple forms.
@@ -550,15 +786,46 @@ class Lookup(threading.Thread):
             _map_cache[form_text] = result
             return result
 
-        for prefix_len in range(len(text), 0, -1):
-            prefix = text[:prefix_len]
+        language = normalize_language_code(language)
+        for prefix in self._lookup_prefixes(text, language):
+            prefix_len = len(prefix)
+            forms = [
+                Form(
+                    text=form.text,
+                    process=form.process,
+                    valid_pos=form.valid_parts_of_speech,
+                )
+                for form in expand_yomitan_forms(language, prefix)
+            ]
+            if language == 'ja':
+                forms.extend(self.deconjugator.deconjugate(prefix))
 
-            forms = self.deconjugator.deconjugate(prefix)
-            forms.add(Form(text=prefix))
+            deduplicated_forms = []
+            seen_forms = set()
+            for form in forms:
+                key = (form.text, form.tags, form.valid_pos)
+                if key in seen_forms:
+                    continue
+                seen_forms.add(key)
+                deduplicated_forms.append(form)
+
+            native_results = self.hoshidicts.query_many([form.text for form in deduplicated_forms])
 
             prefix_hits = []
 
-            for form in forms:
+            for form in deduplicated_forms:
+                for entry in self._format_hoshidicts_terms(
+                    native_results.get(form.text, []),
+                    form,
+                    language,
+                    prefix_len,
+                    text,
+                ):
+                    key = (entry.dictionary_id, entry.written_form, entry.reading)
+                    current = native_collected.get(key)
+                    if current is None or (entry.match_len, entry.priority) > (current.match_len, current.priority):
+                        native_collected[key] = entry
+
                 map_entries = get_entries(form.text)
                 if not map_entries:
                     continue
@@ -566,16 +833,22 @@ class Lookup(threading.Thread):
                 for map_entry in map_entries:
                     written = map_entry[WRITTEN_FORM_INDEX]
                     entry_id = map_entry[ENTRY_ID_INDEX]
+                    source_language = normalize_language_code(
+                        self.entry_sources.get(entry_id, {}).get('language')
+                    )
+                    if source_language != language:
+                        continue
 
                     if written is None and KANJI_REGEX.search(form.text):
                         logger.warning(f"Skipping malformed dictionary entry: kanji key '{form.text}'")
                         continue
 
-                    if form.tags:
-                        required_pos = form.tags[-1]
+                    if form.valid_pos or form.tags:
                         entry_senses = self.dictionary.entries.get(entry_id, [])
                         all_pos = {p for s in entry_senses for p in s['pos']}
-                        if required_pos not in all_pos:
+                        if form.valid_pos and not all_pos.intersection(form.valid_pos):
+                            continue
+                        if form.tags and form.tags[-1] not in all_pos:
                             continue
 
                     if found_primary_match and not KANJI_REGEX.search(prefix):
@@ -593,7 +866,107 @@ class Lookup(threading.Thread):
                     if entry_id not in collected:
                         collected[entry_id] = (map_entry, form, prefix_len)
 
-        return self._format_and_sort(list(collected.values()), text)
+        results = self._format_and_sort(list(collected.values()), text)
+        results.extend(native_collected.values())
+        results.sort(key=lambda entry: (-entry.match_len, -entry.priority, entry.dictionary_priority))
+        return results[:MAX_DICT_ENTRIES]
+
+    def _format_hoshidicts_terms(
+        self,
+        terms: List[Dict[str, Any]],
+        form: Form,
+        language: str,
+        match_len: int,
+        original_lookup: str,
+    ) -> List[DictionaryEntry]:
+        results = []
+        for term in terms:
+            all_pos = set(str(term.get('rules') or '').split())
+            if form.valid_pos and not all_pos.intersection(form.valid_pos):
+                continue
+            if form.tags and form.tags[-1] not in all_pos:
+                continue
+
+            glossaries_by_dictionary = defaultdict(list)
+            for glossary in term.get('glossaries') or []:
+                glossaries_by_dictionary[str(glossary.get('dictionary') or 'Dictionary')].append(glossary)
+
+            frequencies = [
+                int(item['value'])
+                for item in term.get('frequencies') or []
+                if isinstance(item.get('value'), (int, float))
+            ]
+            frequency = min(frequencies, default=DEFAULT_FREQ)
+            written = str(term.get('expression') or form.text)
+            reading = str(term.get('reading') or '')
+
+            for dictionary_name, glossaries in glossaries_by_dictionary.items():
+                source = self.hoshidicts.source_for_dictionary(dictionary_name)
+                if source is None or normalize_language_code(source.get('language')) != language:
+                    continue
+
+                senses = []
+                for glossary in glossaries:
+                    try:
+                        definitions = json.loads(glossary.get('content') or '[]')
+                    except (TypeError, ValueError):
+                        definitions = [str(glossary.get('content') or '')]
+                    tags = ' '.join((
+                        str(glossary.get('definition_tags') or ''),
+                        str(glossary.get('term_tags') or ''),
+                    )).split()
+                    gloss_text = extract_glosses(
+                        definitions if isinstance(definitions, list) else [definitions],
+                        media_loader=lambda media_path, name=dictionary_name: self.hoshidicts.get_media(
+                            name, media_path
+                        ),
+                    )
+                    if gloss_text:
+                        senses.append({
+                            'glosses': gloss_text,
+                            'pos': sorted(all_pos),
+                            'tags': tags,
+                            'source': dictionary_name,
+                        })
+                if not senses:
+                    continue
+
+                dictionary_id = str(source.get('id') or dictionary_name)
+                entry_id = zlib.crc32(f'{dictionary_id}\0{written}\0{reading}'.encode('utf-8'))
+                results.append(DictionaryEntry(
+                    id=entry_id,
+                    written_form=written,
+                    reading=reading,
+                    senses=senses,
+                    freq=frequency,
+                    deconjugation_process=form.process,
+                    priority=self._calculate_priority(written, frequency, form, match_len, original_lookup),
+                    match_len=match_len,
+                    dictionary_name=dictionary_name,
+                    dictionary_id=dictionary_id,
+                    language=language,
+                    profile_name=str(source.get('profile_name') or ''),
+                    dictionary_priority=int(source.get('priority', 9999)),
+                ))
+        return results
+
+    @staticmethod
+    def _lookup_prefixes(text: str, language: str) -> List[str]:
+        if should_lookup_whole_word(text, {language}):
+            prefixes = []
+            candidate = text.strip()
+            while candidate:
+                cleaned = clean_lookup_token(candidate)
+                if cleaned and cleaned not in prefixes:
+                    prefixes.append(cleaned)
+                match = re.search(r'\s+\S*$', candidate)
+                if match is None:
+                    break
+                candidate = candidate[:match.start()].rstrip()
+            return prefixes
+
+        candidate = text.split(maxsplit=1)[0] if text else ''
+        return [candidate[:length] for length in range(len(candidate), 0, -1)]
 
     def _get_map_entries(self, text: str) -> List[tuple]:
         result = self.dictionary.lookup_map.get(text, [])
@@ -627,6 +1000,8 @@ class Lookup(threading.Thread):
             dictionary_name = source_meta.get('dictionary_name', 'Dictionary')
             dictionary_id = source_meta.get('dictionary_id', '')
             dictionary_priority = int(source_meta.get('dictionary_priority', 9999))
+            language = normalize_language_code(source_meta.get('language'))
+            profile_name = source_meta.get('profile_name', '')
 
             entry_senses = self.dictionary.entries.get(entry_id, [])
             priority = self._calculate_priority(written, freq, form, match_len, original_lookup)
@@ -645,6 +1020,8 @@ class Lookup(threading.Thread):
                     'dictionary_name': dictionary_name,
                     'dictionary_id': dictionary_id,
                     'dictionary_priority': dictionary_priority,
+                    'language': language,
+                    'profile_name': profile_name,
                 }
             else:
                 cur = merged[key]
@@ -694,6 +1071,9 @@ class Lookup(threading.Thread):
                     match_len=d['match_len'],
                     dictionary_name=d['dictionary_name'],
                     dictionary_id=d['dictionary_id'],
+                    language=d.get('language', 'ja'),
+                    profile_name=d.get('profile_name', ''),
+                    dictionary_priority=d.get('dictionary_priority', 9999),
                 ))
                 if len(results) >= MAX_DICT_ENTRIES:
                     return results

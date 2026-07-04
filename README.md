@@ -1,6 +1,8 @@
-# weikipop
+# Sel-Pop
 
-weikipop is a desktop Japanese OCR lookup tool built on top of the original Meikipop project line.
+<img src="src/resources/logo.jpg" alt="Sel-Pop logo" width="128">
+
+Sel-Pop is a desktop OCR lookup tool forked from [weidot4/Weikipop](https://github.com/weidot4/Weikipop) and built on the original Meikipop project line.
 
 It continuously or manually scans a screen region, performs OCR, and shows dictionary lookups in a popup. It also supports adding cards to Anki via AnkiConnect.
 
@@ -10,10 +12,12 @@ It continuously or manually scans a screen region, performs OCR, and shows dicti
 ## Features
 
 - Fast screen-region OCR with multiple OCR backends
-- Dictionary lookup with deconjugation and kana/kanji handling, scrollable
-- Multi-dictionary import support (`.zip` Yomitan and `.pkl`)
+- Embedded Yomitan preprocessing and deinflection for every Yomitan-supported language
+- Multi-dictionary import support (`.zip` Yomitan and `.pkl`) with language profiles
+- Memory-mapped HoshiDicts backend for accelerated Yomitan dictionary imports and exact queries
 - Dictionary enable/disable + priority ordering from settings
 - Optional Yomitan API integration
+- Local language profiles that allow multiple languages and dictionaries to be enabled together
 - AnkiConnect export with configurable field mapping
 - Local mining log (`data/mining_log.jsonl`) for SRS workflows
 - Global shortcuts and tray-based settings
@@ -50,21 +54,31 @@ For an initial baseline, copy `config.example.ini` to `config.ini` and adjust va
 
 If you use the **Google Lens (remote)** provider, set:
 
-- `WEIKIPOP_GLENS_API_KEY=<your_api_key>`
+- `SEL_POP_GLENS_API_KEY=<your_api_key>`
+
+The legacy `WEIKIPOP_GLENS_API_KEY` name is still accepted for existing setups.
 
 ## Usage
 
 - Start the app.
-- Use the configured hotkey over Japanese text to trigger lookup.
+- Use the configured hotkey over text for an enabled language profile to trigger lookup.
 - Right-click the tray icon to:
   - select OCR provider
   - choose scan mode/region
   - open settings
 - In Settings → Dictionaries:
   - import dictionaries
+  - add and enable language profiles
+  - assign each dictionary to its source-language profile
   - reorder dictionary priority
   - enable/disable dictionaries
 - Use `Scroll Popup` shortcut (default `Alt+Wheel`) to scroll long lookup popups.
+
+For multilingual OCR, use ScreenAI, Google Lens, or an owocr engine configured
+for the profile languages. MeikiOCR remains a Japanese-specific backend.
+
+New Yomitan ZIP imports use the bundled HoshiDicts worker automatically. Existing
+pickle dictionaries remain supported and can be re-imported to migrate them.
 
 ## Development workflow
 
@@ -86,12 +100,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution standards.
 
 This project is licensed under GPL-3.0. See [LICENSE](LICENSE).
 
+The embedded language-processing bundle is generated from Yomitan and remains
+licensed under GPL-3.0-or-later by the Yomitan Authors.
+
+The accelerated dictionary worker uses [HoshiDicts](https://github.com/Manhhao/hoshidicts)
+under GPL-3.0. Its pinned source is included as a Git submodule; rebuild it with
+`powershell -File scripts/build_hoshidicts.ps1`.
+
 ## Credits
 
-- [rtr46](https://github.com/rtr46) for the original Meikipop project, didn't properly fork when making this project and cannot change it now, really sorry!
+- [weidot4/Weikipop](https://github.com/weidot4/Weikipop), the upstream fork Sel-Pop is based on
+- [rtr46](https://github.com/rtr46) for the original Meikipop project
 - [zurcGH](https://github.com/zurcGH) for Meikipop-Anki lineage
 - [kqq](https://github.com/user-attachments/assets/8d1ebb4e-daeb-4bae-93cc-9ae4a78751df) for being my first initial tester!
-
-
-
-

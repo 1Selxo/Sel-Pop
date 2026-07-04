@@ -1,11 +1,11 @@
-## How to create a custom OCR provider for weikipop
+## How to create a custom OCR provider for Sel-Pop
 
-This guide explains how to create your own OCR provider for weikipop. You can integrate any OCR engine you prefer,
+This guide explains how to create your own OCR provider for Sel-Pop. You can integrate any OCR engine you prefer,
 including offline models or web services.
 
 ## The basics: automatic discovery
 
-weikipop automatically discovers and loads valid OCR providers. To be discovered, your provider must meet two
+Sel-Pop automatically discovers and loads valid OCR providers. To be discovered, your provider must meet two
 conditions:
 
 1. **Directory:** it must be in its own subdirectory inside `/src/ocr/providers/`. For example:
@@ -31,16 +31,16 @@ Your class must have:
         * a `List[Paragraph]` if ocr is successful (return an empty list `[]` if no text is found).
         * `None` if a critical error occurred.
 
-## The data model: converting OCR output to weikipop's format
+## The data model: converting OCR output to Sel-Pop's format
 
-The main task of your `scan` method is to convert your OCR engine output into weikipop's standard data model.
+The main task of your `scan` method is to convert your OCR engine output into Sel-Pop's standard data model.
 
 * **BoundingBox(center_x, center_y, width, height):** represents the location and size of a piece of text.
     * **critical:** all coordinates and dimensions **must be normalized** to a `0.0` to `1.0` float range, relative to
       the input image's dimensions. `(0.0, 0.0)` is the top-left corner.
 
 * **Word(text, separator, box):** represents a recognized string. `text` can be a full word (`"日本語"`) or a single
-  character (`"日"`). weikipop hit scanning handles both cases. Providing single-character boxes often leads to more
+  character (`"日"`). Sel-Pop hit scanning handles both cases. Providing single-character boxes often leads to more
   precise lookups.
     * `separator` is the character that follows the word (usually an empty string `""` for japanese).
     * `box` is a `BoundingBox` object for this specific word.
@@ -64,7 +64,7 @@ center_y = (raw_box['y'] + raw_box['h'] / 2) / img_height  # (100 + 20) / 800 = 
 width = raw_box['w'] / img_width  # 200 / 1000 = 0.2
 height = raw_box['h'] / img_height  # 40 / 800 = 0.05
 
-# create the weikipop object
+# create the Sel-Pop object
 meiki_box = BoundingBox(center_x, center_y, width, height)
 ```
 
@@ -72,9 +72,9 @@ meiki_box = BoundingBox(center_x, center_y, width, height)
 
 Once your provider is implemented:
 
-1. run weikipop.
+1. run Sel-Pop.
 2. right-click the tray icon.
 3. go to ocr provider.
 4. select the NAME of your new provider from the list.
 
-weikipop will now use your class for all OCR operations.
+Sel-Pop will now use your class for all OCR operations.

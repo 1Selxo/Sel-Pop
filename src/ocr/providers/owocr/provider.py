@@ -7,6 +7,12 @@ from PIL import Image
 from websockets.exceptions import ConnectionClosed, WebSocketException
 from websockets.sync.client import connect, ClientConnection
 
+from src.config.config import config
+from src.dictionary.languages import (
+    enabled_profile_languages,
+    is_text_lookup_worthy_for_languages,
+    should_lookup_whole_word,
+)
 from src.ocr.interface import OcrProvider, Paragraph, Word, BoundingBox
 from src.ocr.providers.postprocessing import group_lines_into_paragraphs
 
@@ -76,7 +82,7 @@ class OwocrWebsocketProvider(OcrProvider):
                 owocr_result = json.loads(response_json_str)
 
                 # 3. Process and return the results
-                return self._transform_to_weikipop_format(owocr_result)
+                return self._transform_to_sel_pop_format(owocr_result)
 
             except ConnectionClosed:
                 logger.warning("Websocket connection lost. Will attempt to reconnect...")
@@ -99,17 +105,23 @@ class OwocrWebsocketProvider(OcrProvider):
                 return None
         return None
 
-    def _transform_to_weikipop_format(self, owocr_result: dict) -> List[Paragraph]:
+    def _transform_to_sel_pop_format(self, owocr_result: dict) -> List[Paragraph]:
         raw_lines: List[Paragraph] = []
+        active_languages = enabled_profile_languages(getattr(config, 'dictionary_profiles', []))
 
         for owocr_para in owocr_result.get("paragraphs", []):
             for owocr_line in owocr_para.get("lines", []):
-                line_full_text = "".join(word.get("text", "") for word in owocr_line.get("words", [])).strip()
-                if not line_full_text:
+                word_rows = owocr_line.get("words", [])
+                raw_text = " ".join(word.get("text", "").strip() for word in word_rows).strip()
+                if not is_text_lookup_worthy_for_languages(raw_text, active_languages):
                     continue
 
                 meiki_words: List[Word] = []
-                for word_data in owocr_line.get("words", []):
+                full_text_parts = []
+                for index, word_data in enumerate(word_rows):
+                    word_text = word_data.get("text", "").strip()
+                    use_word_boundaries = should_lookup_whole_word(word_text, active_languages)
+                    separator = ' ' if use_word_boundaries and index < len(word_rows) - 1 else ''
                     word_box_data = word_data.get("bounding_box", {})
                     meiki_word_box = BoundingBox(
                         center_x=word_box_data.get("center_x", 0.0),
@@ -118,8 +130,11 @@ class OwocrWebsocketProvider(OcrProvider):
                         height=word_box_data.get("height", 0.0),
                     )
                     meiki_words.append(Word(
-                        text=word_data.get("text", ""), separator="", box=meiki_word_box
+                        text=word_text, separator=separator, box=meiki_word_box
                     ))
+                    full_text_parts.append(word_text + separator)
+
+                line_full_text = ''.join(full_text_parts).strip()
 
                 line_box_data = owocr_line.get("bounding_box", {})
                 meiki_line_box = BoundingBox(

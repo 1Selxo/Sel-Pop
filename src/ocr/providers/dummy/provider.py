@@ -28,7 +28,7 @@ class DummyProvider(OcrProvider):
 
         This method must be implemented. Its main job is to:
         1. Get OCR data from an external source (library, API, etc.).
-        2. Convert the proprietary data format into weikipop's standard format
+        2. Convert the proprietary data format into Sel-Pop's standard format
            (a list of Paragraph objects with normalized coordinates).
         3. Return the list of Paragraphs.
         """
@@ -74,7 +74,7 @@ class DummyProvider(OcrProvider):
                     "bbox": {"x": 600, "y": 200, "w": 50, "h": 300},  # A vertical bounding box
                     "words": [
                         # NOTE: A `Word` object can contain multiple characters OR a single character.
-                        # weikipop's hit-scanning works well with both approaches.
+                        # Sel-Pop's hit-scanning works well with both approaches.
                         # Providing single-character boxes can lead to more precise lookups.
                         {"text": "縦", "bbox": {"x": 600, "y": 200, "w": 50, "h": 95}},
                         {"text": "書", "bbox": {"x": 600, "y": 305, "w": 50, "h": 95}},
@@ -85,7 +85,7 @@ class DummyProvider(OcrProvider):
 
             # --- 2. PROCESS AND TRANSFORM THE DATA ---
             # This is the most important part. You must convert the raw results from your
-            # OCR engine into the format weikipop understands (`List[Paragraph]`).
+            # OCR engine into the format Sel-Pop understands (`List[Paragraph]`).
 
             paragraphs: List[Paragraph] = []
             img_width, img_height = image.size
@@ -99,7 +99,7 @@ class DummyProvider(OcrProvider):
                 if not line_text or not line_bbox_data:
                     continue
 
-                # weikipop requires NORMALIZED coordinates (from 0.0 to 1.0).
+                # Sel-Pop requires NORMALIZED coordinates (from 0.0 to 1.0).
                 # Here we convert the absolute pixel BBox to a normalized BoundingBox.
                 # Our mock 'bbox' has top-left corner (x,y) and width/height (w,h).
                 center_x = (line_bbox_data['x'] + line_bbox_data['w'] / 2) / img_width

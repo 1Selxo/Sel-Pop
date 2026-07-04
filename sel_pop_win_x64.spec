@@ -4,7 +4,9 @@
 a = Analysis(
     ['src\\main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        ('native/bin/sel-pop-hoshidicts-server.exe', 'native/bin'),
+    ],
     datas=[
         ('src/ocr/providers/glensv2/provider.py', 'src/ocr/providers/glensv2'),
         ('src/ocr/providers/glensv2/lens_betterproto.py', 'src/ocr/providers/glensv2'),
@@ -18,10 +20,12 @@ a = Analysis(
         ('src/ocr/providers/screenai/view_hierarchy_pb2.py', 'src/ocr/providers/screenai'),
         ('src/ocr/providers/screenai/__init__.py', 'src/ocr/providers/screenai'),
         ('src/ocr/providers/__init__.py', 'src/ocr/providers'),
+		('src/dictionary/yomitan_language_bundle.js', 'src/dictionary'),
 		('src/resources/icon.ico', '.'),
 		('src/resources/icon.ico', 'src/resources'),
 		('src/resources/icon.inactive.ico', '.'),
 		('src/resources/icon.inactive.ico', 'src/resources'),
+		('src/resources/logo.jpg', 'src/resources'),
 	],
     hiddenimports=['src.ocr.providers.glensv2', 'src.ocr.providers.owocr', 'src.ocr.providers.meikiocr', 'src.ocr.providers.screenai'],
     hookspath=[],
@@ -39,7 +43,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='weikipop',
+    name='sel-pop',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

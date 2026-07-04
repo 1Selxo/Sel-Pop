@@ -6,7 +6,9 @@ import sys
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "weikipop"
+APP_NAME = "Sel-Pop"
+APP_SLUG = "sel-pop"
+APP_FILE_PREFIX = "sel_pop"
 APP_VERSION = "v.1.12.6"
 MAX_DICT_ENTRIES = 10
 IS_LINUX = sys.platform.startswith('linux')
@@ -30,6 +32,7 @@ class Config:
             'magpie_compatibility': True,
             'show_keyboard_shortcuts': True,
             'dictionary_sources': '[]',
+            'dictionary_profiles': '[]',
         },
         'Theme': {
             'theme_name': 'Celestial Indigo',
@@ -59,7 +62,7 @@ class Config:
             'deck_name': 'Default',
             'model_name': 'Basic',
             'show_hover_status': True,
-            'add_meikipop_tag': True,
+            'add_sel_pop_tag': True,
             'add_document_title_tag': True,
             'enable_screenshot': False,
             'prevent_duplicates': True,
@@ -112,10 +115,16 @@ class Config:
 
         # Parse structured settings
         self.dictionary_sources = self._parse_json(getattr(self, 'dictionary_sources', '[]'), default=[])
+        self.dictionary_profiles = self._parse_json(getattr(self, 'dictionary_profiles', '[]'), default=[])
         self.anki_field_map = self._parse_json(getattr(self, 'field_map', '{}'), default={})
         self.anki_duplicate_check_fields = self._parse_csv(getattr(self, 'duplicate_check_fields', ''), default=[])
         self.anki_sentence_delimiters = self._parse_csv(getattr(self, 'sentence_truncation_delimiters', ''), default=['。'])
         self.anki_sentence_delimiters_remove = self._parse_csv(getattr(self, 'sentence_truncation_delimiters_remove', ''), default=[])
+        if not parser.has_option('Anki', 'add_sel_pop_tag') and parser.has_option('Anki', 'add_meikipop_tag'):
+            self.add_sel_pop_tag = parser.getboolean('Anki', 'add_meikipop_tag')
+            self.anki_add_sel_pop_tag = self.add_sel_pop_tag
+        self.add_meikipop_tag = getattr(self, 'add_sel_pop_tag', True)
+        self.anki_add_meikipop_tag = self.add_meikipop_tag
 
         # Canonical aliases to avoid section key collisions (enabled/api_url/url)
         self.anki_enabled = getattr(self, 'anki_enabled', True)
@@ -158,6 +167,8 @@ class Config:
                 # Serialize structured values back into their string fields
                 if section == 'Settings' and key == 'dictionary_sources':
                     val = json.dumps(getattr(self, 'dictionary_sources', []), ensure_ascii=False)
+                elif section == 'Settings' and key == 'dictionary_profiles':
+                    val = json.dumps(getattr(self, 'dictionary_profiles', []), ensure_ascii=False)
                 if section == 'Anki' and key == 'field_map':
                     val = json.dumps(getattr(self, 'anki_field_map', {}), ensure_ascii=False)
                 elif section == 'Anki' and key == 'duplicate_check_fields':
@@ -170,6 +181,8 @@ class Config:
                     val = getattr(self, 'anki_enabled', getattr(self, 'enabled', True))
                 elif section == 'Anki' and key == 'url':
                     val = getattr(self, 'anki_url', getattr(self, 'url', 'http://127.0.0.1:8765'))
+                elif section == 'Anki' and key == 'add_sel_pop_tag':
+                    val = getattr(self, 'add_sel_pop_tag', getattr(self, 'add_meikipop_tag', True))
                 elif section == 'Yomitan' and key == 'enabled':
                     val = getattr(self, 'yomitan_enabled', False)
                 elif section == 'Yomitan' and key == 'api_url':

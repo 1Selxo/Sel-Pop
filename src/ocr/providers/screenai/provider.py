@@ -1,7 +1,6 @@
 import ctypes
 import logging
 import os
-import re
 import sys
 import time
 from contextlib import contextmanager
@@ -11,10 +10,14 @@ from typing import List, Optional
 from PIL import Image
 from .chrome_screen_ai_pb2 import VisualAnnotation
 
+from src.config.config import config
+from src.dictionary.languages import (
+    enabled_profile_languages,
+    is_text_lookup_worthy_for_languages,
+    should_lookup_whole_word,
+)
 from src.ocr.interface import OcrProvider, Paragraph, Word, BoundingBox
 from src.ocr.providers.postprocessing import group_lines_into_paragraphs
-
-JAPANESE_REGEX = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]')
 
 logger = logging.getLogger(__name__)
 
@@ -170,9 +173,13 @@ class ScreenAiOcr(OcrProvider):
 
     def _transform(self, response: VisualAnnotation, img_w: int, img_h: int) -> List[Paragraph]:
         raw_lines = []
+        active_languages = enabled_profile_languages(getattr(config, 'dictionary_profiles', []))
         for line_box in response.lines:
-            line_has_japanese = any(JAPANESE_REGEX.search(w.utf8_string) for w in line_box.words)
-            if not line_has_japanese:
+            line_has_lookup_text = any(
+                is_text_lookup_worthy_for_languages(w.utf8_string, active_languages)
+                for w in line_box.words
+            )
+            if not line_has_lookup_text:
                 continue
             r = line_box.bounding_box
             line_bbox = BoundingBox(
@@ -187,6 +194,24 @@ class ScreenAiOcr(OcrProvider):
             words_in_line = []
             full_line_text = ""
             for word_box in line_box.words:
+                word_text = word_box.utf8_string.strip()
+                if should_lookup_whole_word(word_text, active_languages):
+                    wr = word_box.bounding_box
+                    separator = ' ' if getattr(word_box, 'has_space_after', False) else ''
+                    w_bbox = BoundingBox(
+                        center_x=(wr.x + wr.width / 2) / img_w,
+                        center_y=(wr.y + wr.height / 2) / img_h,
+                        width=wr.width / img_w,
+                        height=wr.height / img_h
+                    )
+                    words_in_line.append(Word(
+                        text=word_text,
+                        separator=separator,
+                        box=w_bbox
+                    ))
+                    full_line_text += word_text + separator
+                    continue
+
                 for symbol in word_box.symbols:
                     wr = symbol.bounding_box
                     w_bbox = BoundingBox(
@@ -203,7 +228,7 @@ class ScreenAiOcr(OcrProvider):
                     full_line_text += symbol.utf8_string
 
             raw_lines.append(Paragraph(
-                full_text=full_line_text,
+                full_text=full_line_text.strip(),
                 words=words_in_line,
                 box=line_bbox,
                 is_vertical=is_vertical

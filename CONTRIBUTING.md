@@ -1,4 +1,4 @@
-# Contributing to weikipop
+# Contributing to Sel-Pop
 
 Thanks for contributing.
 

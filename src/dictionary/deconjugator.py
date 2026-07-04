@@ -9,6 +9,7 @@ class Form:
     text: str
     process: tuple = field(default_factory=tuple)
     tags: tuple = field(default_factory=tuple)
+    valid_pos: tuple = field(default_factory=tuple)
 
     def __repr__(self):
         return f"Form(text='{self.text}', process={self.process}, tags={self.tags})"

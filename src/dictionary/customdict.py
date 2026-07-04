@@ -4,7 +4,7 @@ import pickle
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Set, Tuple, Optional
+from typing import List, Dict, Any, Set, Tuple
 
 from src.config.config import IS_WINDOWS
 
@@ -45,6 +45,9 @@ class Dictionary:
         # Deconjugation rules consumed by Deconjugator at runtime
         self.deconjugator_rules: list[dict] = []
 
+        # Optional metadata from imported Yomitan dictionaries.
+        self.metadata: dict[str, Any] = {}
+
         self._is_loaded = False
 
     def load_dictionary(self, file_path: str) -> bool:
@@ -59,6 +62,7 @@ class Dictionary:
             self.lookup_map         = data['lookup_map']
             self.kanji_entries      = data.get('kanji_entries', {})
             self.deconjugator_rules = data.get('deconjugator_rules', [])
+            self.metadata           = data.get('metadata', {})
             self._is_loaded = True
             n_refs = sum(len(v) for v in self.lookup_map.values())
             logger.info(

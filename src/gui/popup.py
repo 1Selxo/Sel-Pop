@@ -6,19 +6,27 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from html import escape as html_escape
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 from PyQt6.QtCore import QTimer, QPoint, QSize, Qt, pyqtSignal, QEvent
 from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QFontInfo, QTextDocument
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QApplication, QScrollArea
 
-from src.config.config import config, IS_MACOS
+from src.config.config import APP_FILE_PREFIX, APP_SLUG, config, IS_MACOS
 from src.dictionary.lookup import DictionaryEntry, KanjiEntry
 from src.dictionary.anki_client import AnkiClient
 from src.gui.magpie_manager import magpie_manager
 import re as _re  # hoisted — used in Anki duplicate/presence checks
 from src.utils.window_info import get_active_window_title
+
+try:
+    from src.gui.dictionary_web_view import DictionaryWebView, SHADOW_BASE_CSS
+except ImportError:
+    DictionaryWebView = None
+    SHADOW_BASE_CSS = ''
 
 if IS_MACOS:
     try:
@@ -64,6 +72,7 @@ class Popup(QWidget):
         self._lazy_rendered_parts   = []    # accumulated HTML chunks
         self._lazy_next_group_index = 0     # absolute group index for <hr> placement
         self._dismissed_by_click   = False
+        self._dictionary_css_cache = {}
 
         self.shared_state = shared_state
         self.input_loop   = input_loop
@@ -110,25 +119,29 @@ class Popup(QWidget):
         self.content_layout.setContentsMargins(10, 10, 10, 10)
         self.content_layout.setSpacing(4)
 
-        # Main dictionary content (scrollable)
-        self.display_label = QLabel()
-        self.display_label.setWordWrap(True)
-        self.display_label.setTextFormat(Qt.TextFormat.RichText)
-        self.display_label.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        # AlignTop: pin text to top of the label so it never floats to the
-        # vertical centre when the label is stretched to fill the popup height.
-        self.display_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.content_scroll = QScrollArea()
-        self.content_scroll.setWidgetResizable(True)
-        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # AlignTop: content always starts at the top of the viewport instead of
-        # being vertically centred when it is shorter than the popup height.
-        self.content_scroll.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.content_scroll.setWidget(self.display_label)
-        self.content_layout.addWidget(self.content_scroll)
-        self.content_scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_lazy_load)
+        # Main dictionary content. Qt WebEngine is used when installed because
+        # QTextDocument only implements a small HTML/CSS subset.
+        self._web_renderer_enabled = DictionaryWebView is not None
+        if self._web_renderer_enabled:
+            self.display_label = DictionaryWebView(self.frame)
+            self.content_scroll = self.display_label
+            self.display_label.near_bottom.connect(self._append_next_lazy_batch)
+            self.content_layout.addWidget(self.display_label)
+        else:
+            self.display_label = QLabel()
+            self.display_label.setWordWrap(True)
+            self.display_label.setTextFormat(Qt.TextFormat.RichText)
+            self.display_label.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+            self.display_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            self.content_scroll = QScrollArea()
+            self.content_scroll.setWidgetResizable(True)
+            self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.content_scroll.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            self.content_scroll.setWidget(self.display_label)
+            self.content_layout.addWidget(self.content_scroll)
+            self.content_scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_lazy_load)
 
         # Brief status message (e.g. "Mined!" / "Already in Anki") — hidden by default
         self.status_label = QLabel()
@@ -222,6 +235,88 @@ class Popup(QWidget):
             }}
         """)
 
+    def _build_web_document(self, body_html: str) -> str:
+        mode = 'compact' if config.compact_mode else 'default'
+        return f'''<!doctype html>
+<html data-glossary-layout-mode="{mode}"><head><meta charset="utf-8">
+<meta name="color-scheme" content="dark light">
+<style>
+html, body {{ margin:0; padding:0; background:transparent; color:{config.color_foreground}; }}
+body {{ font-family:{json.dumps(config.font_family)}; overflow-x:hidden; overflow-wrap:anywhere; }}
+hr {{ border:0; border-top:1px solid color-mix(in srgb, currentColor 25%, transparent); margin:0; }}
+.entry-header {{ line-height:1.25; }}
+.entry-definition {{ min-width:0; }}
+.dictionary-block {{ display:block; min-width:0; max-width:100%; }}
+a {{ color:#4da3ff; }}
+</style></head><body>{body_html}</body></html>'''
+
+    def _set_display_html(self, body_html: str, preserve_scroll: bool = False):
+        if self._web_renderer_enabled:
+            self.display_label.set_document(
+                self._build_web_document(body_html),
+                preserve_scroll=preserve_scroll,
+            )
+        else:
+            self.display_label.setText(body_html)
+
+    def _reset_content_scroll(self):
+        if self._web_renderer_enabled:
+            self.display_label.reset_scroll()
+        else:
+            self.content_scroll.verticalScrollBar().setValue(0)
+
+    def _scroll_content_by(self, pixels: int):
+        if self._web_renderer_enabled:
+            self.display_label.scroll_by(pixels)
+        else:
+            scrollbar = self.content_scroll.verticalScrollBar()
+            scrollbar.setValue(scrollbar.value() + pixels)
+
+    def _dictionary_stylesheet(self, entry: DictionaryEntry) -> str:
+        dictionary_id = str(getattr(entry, 'dictionary_id', '') or '')
+        source = next((
+            item for item in (getattr(config, 'dictionary_sources', []) or [])
+            if str(item.get('id') or '') == dictionary_id
+        ), None)
+        if source is None:
+            return ''
+
+        source_path = Path(str(source.get('path') or ''))
+        css_path = source_path / 'styles.css' if source_path.is_dir() else source_path.with_suffix('.css')
+        try:
+            mtime = css_path.stat().st_mtime_ns
+        except OSError:
+            return ''
+        cached = self._dictionary_css_cache.get(str(css_path))
+        if cached and cached[0] == mtime:
+            return cached[1]
+        try:
+            css = css_path.read_text(encoding='utf-8')
+        except OSError:
+            return ''
+        # Dictionary styles expect Yomitan's document root. Inside an isolated
+        # shadow tree, .dictionary-root is the equivalent scope.
+        css = css.replace(':root', '.dictionary-root').replace('</style', '<\\/style')
+        self._dictionary_css_cache[str(css_path)] = (mtime, css)
+        return css
+
+    def _wrap_dictionary_content(self, entry: DictionaryEntry, content_html: str) -> str:
+        if not self._web_renderer_enabled:
+            return f'<div class="dictionary-block">{content_html}</div>'
+        dictionary_name = html_escape(
+            str(getattr(entry, 'dictionary_name', '') or 'Dictionary'), quote=True
+        )
+        mode = 'compact' if config.compact_mode else 'default'
+        css = SHADOW_BASE_CSS + self._dictionary_stylesheet(entry)
+        css = css.replace('</style', '<\\/style')
+        return (
+            f'<div class="dictionary-block" data-dictionary="{dictionary_name}">'
+            '<template shadowrootmode="open">'
+            f'<style>{css}</style>'
+            f'<div class="dictionary-root" data-glossary-layout-mode="{mode}">'
+            f'{content_html}</div></template></div>'
+        )
+
     # ------------------------------------------------------------------ #
     #  Font calibration                                                     #
     # ------------------------------------------------------------------ #
@@ -303,9 +398,9 @@ class Popup(QWidget):
             full_html = self._calculate_content(latest_data)
             if full_html is not None:
                 if full_html != self._last_html:
-                    self.display_label.setText(full_html)
+                    self._set_display_html(full_html)
                     self._last_html = full_html
-                    self.content_scroll.verticalScrollBar().setValue(0)
+                    self._reset_content_scroll()
                     self._scroll_reset_frames = 8
 
                 # Fixed consistent size — same width and height regardless of
@@ -355,8 +450,7 @@ class Popup(QWidget):
             if self.is_visible and self._is_scroll_shortcut_active(scroll_shortcut):
                 delta = self.input_loop.get_and_reset_scroll_delta()
                 if delta:
-                    scrollbar = self.content_scroll.verticalScrollBar()
-                    scrollbar.setValue(scrollbar.value() - (delta * 42))
+                    self._scroll_content_by(-(delta * 42))
             else:
                 # Do not carry stale wheel deltas between frames.
                 self.input_loop.get_and_reset_scroll_delta()
@@ -403,7 +497,7 @@ class Popup(QWidget):
                 # Keep forcing scroll to top for a few frames after content changes
                 # so Qt's layout engine can never leave blank space at the top.
                 if self._scroll_reset_frames > 0:
-                    self.content_scroll.verticalScrollBar().setValue(0)
+                    self._reset_content_scroll()
                     self._scroll_reset_frames -= 1
 
                 mouse_pos = QCursor.pos()
@@ -648,8 +742,8 @@ class Popup(QWidget):
             fields = {"Front": word or reading, "Back": meaning_str}
 
         tags = []
-        if getattr(config, "add_meikipop_tag", True):
-            tags.append("weikipop")
+        if getattr(config, "add_sel_pop_tag", getattr(config, "add_meikipop_tag", True)):
+            tags.append(APP_SLUG)
         if getattr(config, "add_document_title_tag", True):
             title = (ctx.get("document_title") or "").strip()
             if title:
@@ -667,7 +761,7 @@ class Popup(QWidget):
                 from PIL import Image
                 screenshot = ctx["screenshot"]
                 img  = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-                fname = f"weikipop_{int(time.time())}.png"
+                fname = f"{APP_FILE_PREFIX}_{int(time.time())}.png"
                 bio   = BytesIO()
                 img.save(bio, format="PNG")
                 b64 = base64.b64encode(bio.getvalue()).decode("ascii")
@@ -845,34 +939,44 @@ class Popup(QWidget):
             if config.show_pos and pos_list:
                 pos_str = f' ({", ".join(pos_list)})'
                 s_calc += pos_str
-                s_html += f'<span style="color:{config.color_foreground};opacity:0.7;"><i>{pos_str}</i></span> '
+                s_html += (
+                    f'<span style="color:{config.color_foreground};opacity:0.7;">'
+                    f'<i>{html_escape(pos_str)}</i></span> '
+                )
             if config.show_tags and tags_list:
                 t_str = f' [{", ".join(tags_list)}]'
                 s_calc += t_str
                 s_html += (f'<span style="color:{config.color_foreground};'
-                           f'font-size:{config.font_size_definitions-2}px;opacity:0.7;">{t_str}</span> ')
+                           f'font-size:{config.font_size_definitions-2}px;opacity:0.7;">'
+                           f'{html_escape(t_str)}</span> ')
             s_calc += gloss_str
             s_html += gloss_str
             parts_calc.append(s_calc)
             parts_html.append(s_html)
 
-        if config.compact_mode:
+        has_structured_content = any(
+            'class="structured-content"' in gloss
+            for sense in entry.senses
+            for gloss in sense.get('glosses', [])
+        )
+        if config.compact_mode and not has_structured_content:
             sep = "; "
             full_def_html = sep.join(parts_html)
             max_ratio = max(max_ratio, len(sep.join(parts_calc)) / self.def_chars_per_line)
         else:
-            sep = "<br>"
-            full_def_html = sep.join(parts_html)
+            full_def_html = ''.join(
+                f'<div class="sense-item">{part}</div>' for part in parts_html
+            )
             for p in parts_calc:
                 max_ratio = max(max_ratio, len(p) / self.def_chars_per_line)
 
-        if inline_only:
-            senses_html = (f'<span style="font-size:{config.font_size_definitions}px;">'
-                           f'{full_def_html}</span>')
-        else:
-            sep_space = " " if config.compact_mode else "<br>"
-            senses_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
-                           f'{full_def_html}</span>')
+        content = (
+            f'<div class="entry-definition" style="font-size:{config.font_size_definitions}px;">'
+            f'{full_def_html}</div>'
+        )
+        wrapped = self._wrap_dictionary_content(entry, content)
+        sep_space = '' if inline_only or config.compact_mode else '<br>'
+        senses_html = f'{sep_space}{wrapped}'
         return senses_html, max_ratio
 
     # How many word/reading groups to render on first display, and per scroll trigger.
@@ -910,20 +1014,23 @@ class Popup(QWidget):
             max_ratio = max(max_ratio, len(header_calc) / self.header_chars_per_line)
 
             header_html = (
-                f'<span style="color:{config.color_highlight_word};'
-                f'font-size:{config.font_size_header}px;">{first_entry.written_form}</span>'
+                f'<span class="entry-header" style="color:{config.color_highlight_word};'
+                f'font-size:{config.font_size_header}px;">'
+                f'{html_escape(first_entry.written_form or "")}</span>'
             )
             if first_entry.reading:
                 header_html += (
                     f' <span style="color:{config.color_highlight_reading};'
-                    f'font-size:{config.font_size_header - 2}px;">[{first_entry.reading}]</span>'
+                    f'font-size:{config.font_size_header - 2}px;">'
+                    f'[{html_escape(first_entry.reading)}]</span>'
                 )
             if first_entry.deconjugation_process and config.show_deconjugation:
                 dc = " ← ".join(p for p in first_entry.deconjugation_process if p)
                 if dc:
                     header_html += (
                         f' <span style="color:{config.color_foreground};'
-                        f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">({dc})</span>'
+                        f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">'
+                        f'({html_escape(dc)})</span>'
                     )
             if config.show_frequency and first_entry.freq < 999_999:
                 header_html += (
@@ -940,7 +1047,7 @@ class Popup(QWidget):
                     dict_label = (
                         f'<span style="color:{config.color_foreground};'
                         f'font-size:{config.font_size_definitions}px;opacity:0.85;">'
-                        f'<b>{dict_name}:</b> </span>'
+                        f'<b>{html_escape(dict_name)}:</b> </span>'
                     )
                     body_parts.append(f'{dict_label}{senses_html}')
                 else:
@@ -949,7 +1056,7 @@ class Popup(QWidget):
                         header_html += (
                             f' <span style="color:{config.color_foreground};'
                             f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
-                            f'[{entry.dictionary_name}]</span>'
+                            f'[{html_escape(entry.dictionary_name)}]</span>'
                         )
                     body_parts.append(senses_html)
 
@@ -1037,7 +1144,7 @@ class Popup(QWidget):
     def _on_scroll_lazy_load(self, value: int):
         """Triggered by the scrollbar — appends the next batch of entry groups
         when the user has scrolled at least 70% of the way through current content."""
-        if not self._lazy_pending_groups:
+        if self._web_renderer_enabled or not self._lazy_pending_groups:
             return
         sb = self.content_scroll.verticalScrollBar()
         if sb.maximum() > 0 and value >= sb.maximum() * 0.70:
@@ -1048,8 +1155,8 @@ class Popup(QWidget):
         without disturbing the user's current scroll position."""
         if not self._lazy_pending_groups:
             return
-        sb        = self.content_scroll.verticalScrollBar()
-        saved_pos = sb.value()
+        sb = None if self._web_renderer_enabled else self.content_scroll.verticalScrollBar()
+        saved_pos = sb.value() if sb is not None else 0
 
         batch                     = self._lazy_pending_groups[:self._GROUPS_PER_LOAD]
         self._lazy_pending_groups = self._lazy_pending_groups[self._GROUPS_PER_LOAD:]
@@ -1062,10 +1169,11 @@ class Popup(QWidget):
 
         full_html       = "".join(self._lazy_rendered_parts)
         self._last_html = full_html   # keep in sync so the 60ms timer doesn't re-render
-        self.display_label.setText(full_html)
+        self._set_display_html(full_html, preserve_scroll=True)
         # Restore position after Qt settles the layout — content above the
         # saved position is unchanged so this keeps the view perfectly stable.
-        QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
+        if sb is not None:
+            QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
 
     def _render_kanji_entry(self, entry: KanjiEntry) -> str:
         c_word = config.color_highlight_word

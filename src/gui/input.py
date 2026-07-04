@@ -6,14 +6,13 @@ import time
 
 from pynput import mouse
 
-from src.config.config import config, IS_LINUX, IS_MACOS
+from src.config.config import APP_NAME, config, IS_LINUX, IS_MACOS
 
 if IS_LINUX:
     from Xlib import display as xlib_display
     from Xlib.error import XError
     from Xlib import XK
 elif IS_MACOS:
-    import Quartz
     from AppKit import NSEvent
 else:
     import ctypes
@@ -125,7 +124,7 @@ class LinuxX11KeyboardController:
             self._setup_keycodes()
         except (XError, Exception) as e:
             logger.critical("Could not connect to X server. Is DISPLAY environment variable set? Error: %s", e)
-            logger.critical("Weikipop cannot run without a graphical session.")
+            logger.critical("%s cannot run without a graphical session.", APP_NAME)
             sys.exit(1)
 
     def _setup_keycodes(self):

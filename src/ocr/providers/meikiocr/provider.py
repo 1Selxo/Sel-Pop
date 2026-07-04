@@ -67,15 +67,15 @@ class MeikiOcrProvider(OcrProvider):
                 punct_conf_factor=0.2
             )
 
-            # --- 2. Transform the library's output to MeikiPop's format ---
-            return self._to_meikipop_paragraphs(ocr_results, img_width, img_height)
+            # --- 2. Transform the library's output to Sel-Pop's format ---
+            return self._to_sel_pop_paragraphs(ocr_results, img_width, img_height)
 
         except Exception as e:
             logger.error(f"an error occurred in {self.NAME}: {e}", exc_info=True)
             return None  # returning none indicates a failure.
 
     def _to_normalized_bbox(self, bbox_pixels: list, img_width: int, img_height: int) -> BoundingBox:
-        """converts an [x1, y1, x2, y2] pixel bbox to a normalized meikipop BoundingBox."""
+        """converts an [x1, y1, x2, y2] pixel bbox to a normalized Sel-Pop BoundingBox."""
         x1, y1, x2, y2 = bbox_pixels
         box_w, box_h = x2 - x1, y2 - y1
 
@@ -86,8 +86,8 @@ class MeikiOcrProvider(OcrProvider):
 
         return BoundingBox(center_x, center_y, norm_w, norm_h)
 
-    def _to_meikipop_paragraphs(self, ocr_results: list, img_width: int, img_height: int) -> List[Paragraph]:
-        """converts the final meikiocr result list into weikipop's Paragraph format."""
+    def _to_sel_pop_paragraphs(self, ocr_results: list, img_width: int, img_height: int) -> List[Paragraph]:
+        """converts the final MeikiOCR result list into Sel-Pop's Paragraph format."""
         lines: List[Paragraph] = []
         for line_result in ocr_results:
             full_text = line_result.get("text", "").strip()

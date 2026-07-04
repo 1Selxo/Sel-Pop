@@ -68,7 +68,7 @@ def main():
     --------------------------------------------------
     {APP_NAME}.{APP_VERSION} is running in the background.
 
-      - To use: Press and hold '{config.hotkey}' over Japanese text. 
+      - To use: Press and hold '{config.hotkey}' over text for an enabled language profile.
       - To configure or change scan area: Right-click the icon in your system tray.
       - Make sure to checkout the auto scan mode!
       - To exit: Press Ctrl+C in this terminal.

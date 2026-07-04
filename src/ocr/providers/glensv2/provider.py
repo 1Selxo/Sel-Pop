@@ -4,7 +4,6 @@ import logging
 import math
 import os
 import random
-import re
 import time
 from typing import Optional, List, Tuple
 
@@ -12,12 +11,15 @@ import requests
 from PIL import Image
 
 from src.config.config import config
+from src.dictionary.languages import (
+    enabled_profile_languages,
+    is_text_lookup_worthy_for_languages,
+    should_lookup_whole_word,
+)
 from src.ocr.interface import OcrProvider, Paragraph, Word, BoundingBox
 from src.ocr.providers.glensv2.lens_betterproto import LensOverlayServerRequest, WritingDirection, \
     LensOverlayServerResponse
 from src.ocr.providers.postprocessing import group_lines_into_paragraphs
-
-JAPANESE_REGEX = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]')
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +28,13 @@ class GoogleLensOcrV2(OcrProvider):
     NAME = "Google Lens (remote)"
 
     def __init__(self):
-        api_key = os.getenv('WEIKIPOP_GLENS_API_KEY', '').strip()
+        api_key = (
+            os.getenv('SEL_POP_GLENS_API_KEY', '').strip()
+            or os.getenv('WEIKIPOP_GLENS_API_KEY', '').strip()
+        )
         if not api_key:
             raise RuntimeError(
-                'Missing WEIKIPOP_GLENS_API_KEY environment variable for Google Lens provider.'
+                'Missing SEL_POP_GLENS_API_KEY environment variable for Google Lens provider.'
             )
 
         self._session = requests.Session()
@@ -79,19 +84,27 @@ class GoogleLensOcrV2(OcrProvider):
             glens_response = LensOverlayServerResponse().FromString(response.content)
 
             raw_lines = []
+            active_languages = enabled_profile_languages(getattr(config, 'dictionary_profiles', []))
             if glens_response.objects_response.text.text_layout:
                 for para in glens_response.objects_response.text.text_layout.paragraphs:
                     is_vertical = para.writing_direction == WritingDirection.TOP_TO_BOTTOM
 
                     for line in para.lines:
-                        line_has_japanese = any(JAPANESE_REGEX.search(w.plain_text) for w in line.words)
-                        if not line_has_japanese:
+                        line_has_lookup_text = any(
+                            is_text_lookup_worthy_for_languages(w.plain_text, active_languages)
+                            for w in line.words
+                        )
+                        if not line_has_lookup_text:
                             continue
 
                         words_in_line = []
                         full_line_text = ""
                         for word in line.words:
-                            clean_word_text = word.plain_text.replace(' ', '')
+                            clean_word_text = word.plain_text.strip()
+                            use_word_boundaries = should_lookup_whole_word(clean_word_text, active_languages)
+                            if not use_word_boundaries:
+                                clean_word_text = clean_word_text.replace(' ', '')
+                            separator = ' ' if use_word_boundaries else ''
 
                             w_box = BoundingBox(
                                 center_x=word.geometry.bounding_box.center_x,
@@ -99,8 +112,8 @@ class GoogleLensOcrV2(OcrProvider):
                                 width=word.geometry.bounding_box.width,
                                 height=word.geometry.bounding_box.height,
                             )
-                            words_in_line.append(Word(text=clean_word_text, separator='', box=w_box))
-                            full_line_text += clean_word_text
+                            words_in_line.append(Word(text=clean_word_text, separator=separator, box=w_box))
+                            full_line_text += clean_word_text + separator
 
                         if full_line_text:
                             l_box = BoundingBox(

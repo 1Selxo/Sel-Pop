@@ -54,7 +54,7 @@ def _extract_text(node) -> str:
     return ''
 
 
-def _extract_glosses(definitions: list) -> list[str]:
+def extract_glosses(definitions: list, media_loader=None) -> list[str]:
     glosses: list[str] = []
     for definition in definitions:
         if isinstance(definition, str):
@@ -68,12 +68,23 @@ def _extract_glosses(definitions: list) -> list[str]:
                 if text:
                     glosses.append(escape(text))
             elif def_type == 'structured-content':
-                rendered = handle_structured_content(definition)
+                rendered = handle_structured_content(definition, media_loader=media_loader)
                 for html_fragment in rendered:
                     fragment = (html_fragment or '').strip()
                     if fragment:
                         glosses.append(fragment)
     return glosses
+
+
+def read_yomitan_stylesheet(zip_path: str) -> str:
+    with zipfile.ZipFile(zip_path, 'r') as archive:
+        name = next(
+            (item for item in archive.namelist() if Path(item).name == 'styles.css'),
+            None,
+        )
+        if name is None:
+            return ''
+        return archive.read(name).decode('utf-8', errors='replace')
 
 
 def _parse_freq_value(freq_data) -> Optional[int]:
@@ -119,13 +130,18 @@ def _load_freq_map_from_zip(zf: zipfile.ZipFile) -> dict:
     return freq
 
 
-def _has_kanji(text: str) -> bool:
-    return any(0x4E00 <= ord(c) <= 0x9FFF for c in text)
+def read_yomitan_index(zip_path: str) -> dict:
+    with zipfile.ZipFile(zip_path, 'r') as archive:
+        if 'index.json' not in archive.namelist():
+            return {}
+        with archive.open('index.json') as file:
+            return json.load(file)
 
 
 def convert_yomitan_zip_to_payload(zip_path: str, dict_index: int = 0) -> Tuple[dict, str]:
     with zipfile.ZipFile(zip_path, 'r') as zf:
         dict_title = Path(zip_path).stem
+        index_meta = {}
         if 'index.json' in zf.namelist():
             with zf.open('index.json') as file:
                 index_meta = json.load(file)
@@ -175,7 +191,7 @@ def convert_yomitan_zip_to_payload(zip_path: str, dict_index: int = 0) -> Tuple[
             definitions = row[5] if len(row) > 5 else []
             term_tags_str = row[7] if len(row) > 7 else ''
 
-            glosses = _extract_glosses(definitions)
+            glosses = extract_glosses(definitions)
             if not glosses:
                 continue
 
@@ -195,34 +211,34 @@ def convert_yomitan_zip_to_payload(zip_path: str, dict_index: int = 0) -> Tuple[
 
         entries[entry_id] = senses
 
-        seen_terms = set()
-        seen_readings = set()
+        seen_surfaces = set()
 
         for row in group_rows:
             term = row[0]
             reading = row[1]
 
-            if _has_kanji(term) and term not in seen_terms:
-                seen_terms.add(term)
+            if term and term not in seen_surfaces:
+                seen_surfaces.add(term)
                 display_reading = reading if reading else canonical_reading
                 freq = freq_for(term, display_reading)
                 lookup_map[term].append((canonical_term, display_reading, freq, entry_id))
 
-            kana_surface = reading if reading else term
-            if kana_surface not in seen_readings:
-                seen_readings.add(kana_surface)
-                if reading:
-                    freq = freq_for(kana_surface, reading)
-                    lookup_map[kana_surface].append((canonical_term, reading, freq, entry_id))
-                else:
-                    freq = freq_for(term, '')
-                    lookup_map[term].append((term, None, freq, entry_id))
+            if reading and reading != term and reading not in seen_surfaces:
+                seen_surfaces.add(reading)
+                freq = freq_for(term, reading)
+                lookup_map[reading].append((canonical_term, reading, freq, entry_id))
 
     payload = {
         'entries': entries,
         'lookup_map': dict(lookup_map),
         'kanji_entries': {},
         'deconjugator_rules': [],
+        'metadata': {
+            'title': dict_title,
+            'revision': index_meta.get('revision', ''),
+            'source_language': index_meta.get('sourceLanguage', ''),
+            'target_language': index_meta.get('targetLanguage', ''),
+        },
     }
     return payload, dict_title
 
