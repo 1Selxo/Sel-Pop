@@ -61,22 +61,62 @@ class DictionaryWebView(QWebEngineView):
 
     def reset_scroll(self):
         self._restore_scroll_y = 0
-        self.page().runJavaScript('window.scrollTo(0, 0)')
+        self.page().runJavaScript(
+            '(() => {'
+            'const el = document.scrollingElement || document.documentElement || document.body;'
+            'if (el) { el.scrollTop = 0; }'
+            '})();'
+        )
 
     def scroll_by(self, pixels: int):
-        self.page().runJavaScript(f'window.scrollBy(0, {int(pixels)})')
+        pixels = int(pixels)
+        script = f'''
+(() => {{
+    const el = document.scrollingElement || document.documentElement || document.body;
+    if (!el) {{
+        return null;
+    }}
+    el.scrollTop += {pixels};
+    return {{
+        top: el.scrollTop,
+        height: el.scrollHeight,
+        viewport: el.clientHeight || window.innerHeight || 0
+    }};
+}})();
+'''
+        self.page().runJavaScript(script, self._on_scroll_metrics)
 
     def _on_load_finished(self, _ok: bool):
         y = self._restore_scroll_y
-        self.page().runJavaScript(f'window.scrollTo(0, {y})')
+        self.page().runJavaScript(
+            '(() => {'
+            'const el = document.scrollingElement || document.documentElement || document.body;'
+            f'if (el) {{ el.scrollTop = {int(y)}; }}'
+            '})();'
+        )
+
+    def _on_scroll_metrics(self, metrics):
+        if not isinstance(metrics, dict):
+            return
+        self._maybe_emit_near_bottom(
+            float(metrics.get('top') or 0),
+            float(metrics.get('height') or 0),
+            float(metrics.get('viewport') or self.height()),
+        )
 
     def _on_scroll_position_changed(self, position):
+        self._maybe_emit_near_bottom(
+            float(position.y()),
+            float(self.page().contentsSize().height()),
+            float(self.height()),
+        )
+
+    def _maybe_emit_near_bottom(self, top: float, content_height: float, viewport_height: float):
         if self._near_bottom_sent:
             return
-        content_height = self.page().contentsSize().height()
         if content_height <= 0:
             return
-        if position.y() + self.height() >= content_height * 0.70:
+        if top + viewport_height >= content_height * 0.70:
             self._near_bottom_sent = True
             self.near_bottom.emit()
 

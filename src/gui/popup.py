@@ -392,9 +392,10 @@ a {{ color:#4da3ff; }}
 
         latest_data, latest_context = self.get_latest_data()
 
-        # Re-render only when content actually changes
-        if latest_data and (latest_data    != self._last_latest_data or
-                            latest_context != self._last_latest_context):
+        # Re-render only when entries actually change. Context can refresh with
+        # screenshots/window titles while the visible definitions are identical;
+        # treating that as content churn makes scrolling snap back to the top.
+        if latest_data and latest_data != self._last_latest_data:
             full_html = self._calculate_content(latest_data)
             if full_html is not None:
                 if full_html != self._last_html:
@@ -446,18 +447,29 @@ a {{ color:#4da3ff; }}
                 self.copy_to_clipboard()
             self.copy_shortcut_was_pressed = copy_pressed
 
-            scroll_shortcut = getattr(config, 'scroll_popup', 'Alt+Wheel')
-            if self.is_visible and self._is_scroll_shortcut_active(scroll_shortcut):
-                delta = self.input_loop.get_and_reset_scroll_delta()
-                if delta:
-                    self._scroll_content_by(-(delta * 42))
-            else:
-                # Do not carry stale wheel deltas between frames.
-                self.input_loop.get_and_reset_scroll_delta()
         else:
             self.anki_shortcut_was_pressed = False
             self.copy_shortcut_was_pressed = False
-            self.input_loop.get_and_reset_scroll_delta()
+
+        self._handle_scroll_input()
+
+    def _handle_scroll_input(self):
+        delta = self.input_loop.get_and_reset_scroll_delta()
+        if not delta or not self.is_visible:
+            return
+
+        shortcut = getattr(config, 'scroll_popup', 'Alt+Wheel')
+        if self._should_scroll_popup(shortcut):
+            self._scroll_content_by(-(delta * 42))
+
+    def _should_scroll_popup(self, shortcut: str) -> bool:
+        shortcut = (shortcut or '').strip()
+        lower = shortcut.lower()
+        if lower in {'wheel', 'mousewheel'}:
+            return True
+        if self.frameGeometry().contains(QCursor.pos()):
+            return True
+        return self._is_scroll_shortcut_active(shortcut)
 
     def _is_scroll_shortcut_active(self, shortcut: str) -> bool:
         shortcut = (shortcut or '').strip()
